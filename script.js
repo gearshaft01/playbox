@@ -480,8 +480,10 @@ function account() {
             <h1>Account</h1>
             <p class="mu">Create an account or sign in with your email and password. Email confirmation may be required.</p>
             ${authClient ? '' : '<p class="mu">Supabase is not configured. Add your project URL and publishable key in script.js, then redeploy.</p>'}
-            <label>Email <input id="auth-email" type="email" autocomplete="email" required></label>
-            <label>Password <input id="auth-password" type="password" autocomplete="new-password" minlength="6" required></label>
+            <div class="auth-form">
+                <label>Email <input id="auth-email" type="email" autocomplete="email" required></label>
+                <label>Password <input id="auth-password" type="password" autocomplete="new-password" minlength="6" required></label>
+            </div>
             <div class="bar">
                 <button class="b p" data-a="signIn">Sign in</button>
                 <button class="b" data-a="signUp">Create account</button>
@@ -547,35 +549,65 @@ const actionHandlers = {
         draft = { ...starterTemplate };
         fillStudioInputs();
     },
-    sub() {
+    async sub() {
         if (!db.user) return toast('Sign in on the Account page to submit.');
-        const documentSource = buildGameDocument(draft, draft.title);
         if (!draft.title.trim()) return toast('Add a title.');
         if (!draft.js.trim() && !draft.html.trim()) return toast('Nothing to submit yet.');
-        if (documentSource.length > 5e6) return toast('This game is over 5 MB.');
-
-        let game = draft.id && db.games.find((entry) => entry.id == draft.id && entry.author == db.user);
-        if (!game) {
-            game = { id: 'g' + Date.now().toString(36), author: db.user, versions: [] };
-            db.games.push(game);
-            draft.id = game.id;
+        if (draft.id) return toast('Submitting new versions is not connected yet. Start from a new game template.');
+        if (new TextEncoder().encode(draft.html + draft.css + draft.js).length > 1_800_000) {
+            return toast('This game is too large for D1 storage. The limit is about 1.8 MB.');
         }
+        if (!authClient) return toast('Supabase is not configured.');
 
-        game.versions.push({
-            n: game.versions.length + 1,
-            status: 'pending',
-            reason: '',
-            title: draft.title,
-            desc: draft.desc,
-            color: getColor(draft.color),
-            html: draft.html,
-            css: draft.css,
-            js: draft.js
-        });
+        try {
+            const { data, error: sessionError } = await authClient.auth.getSession();
+            if (sessionError) throw sessionError;
+            if (!data.session) return toast('Sign in again before submitting.');
 
-        saveData();
-        toast('Submitted version ' + game.versions.length + ' for review.');
-        studio();
+            const response = await fetch(`${API_BASE_URL}/api/games`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${data.session.access_token}`
+                },
+                body: JSON.stringify({
+                    title: draft.title.trim(),
+                    description: draft.desc,
+                    color: getColor(draft.color),
+                    html: draft.html,
+                    css: draft.css,
+                    js: draft.js
+                })
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.error || `Submission failed (${response.status})`);
+            if (typeof result.id !== 'string' || result.status !== 'pending') {
+                throw new Error('The server returned an invalid submission response.');
+            }
+
+            const submittedGame = {
+                id: result.id,
+                author: db.user,
+                versions: [{
+                    n: 1,
+                    status: 'pending',
+                    reason: '',
+                    title: draft.title.trim(),
+                    desc: draft.desc,
+                    color: getColor(draft.color),
+                    html: draft.html,
+                    css: draft.css,
+                    js: draft.js
+                }]
+            };
+            db.games.push(submittedGame);
+            draft.id = result.id;
+            saveData();
+            toast('Submitted to the server for review.');
+            studio();
+        } catch (error) {
+            toast(`Could not submit game: ${error.message}`);
+        }
     },
     edit(gameId) {
         const game = db.games.find((entry) => entry.id == gameId);
