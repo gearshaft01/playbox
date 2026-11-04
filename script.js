@@ -9,12 +9,15 @@ const escapeHtml = (value) =>
 
 const KEY = 'playbox-proto-1';
 const API_BASE_URL = 'https://playbox-api.gearshaft01.workers.dev';
+const SUPABASE_URL = 'https://gahjnjpockmwhozouyew.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_hGku3vvs1IlHqswTc3MvBg_gAkF-vOR';
 const getColor = (color) => (/^#[0-9a-f]{6}$/i.test(color) ? color : '#3d34e8');
 
 let memory = null;
 let toastHandle;
 let activeTab = 'html';
 let currentRoute = { v: 'browse' };
+let authClient = null;
 
 const toast = (message) => {
     const toastNode = $('#t');
@@ -123,6 +126,7 @@ const loadData = () => {
 
 let db = loadData() || seedData();
 let draft = db.draft || { ...starterTemplate };
+db.user = '';
 
 const saveData = () => {
     memory = db;
@@ -189,7 +193,7 @@ function render() {
 }
 
 async function browse() {
-    $('#app').innerHTML = '<h1>Games that fit in one file.</h1><p class="mu">Every game here was checked by a moderator and runs in a locked sandbox.</p><input id="q" type="search" placeholder="Search games" aria-label="Search games"><div class="grid" id="gr"></div>';
+    $('#app').innerHTML = '<h1>Games made by players</h1><p class="mu">Every game here was checked by a moderator and runs in a locked sandbox.</p><input id="q" type="search" placeholder="Search games" aria-label="Search games"><div class="grid" id="gr"></div>';
     let remoteGames = [];
 
     const redrawCatalog = () => {
@@ -469,10 +473,21 @@ function review() {
 
 function account() {
     const currentUser = db.user;
-    const tools = `<h2>Prototype tools</h2><div class="bar"><button class="b" data-a="mod">Moderator mode: ${db.mod ? 'on' : 'off'}</button><button class="b" data-a="rst">Reset all data</button></div>`;
+    const tools = `<h2>Prototype tools</h2><p class="mu sm">These controls affect only this browser. Moderator mode does not grant server permissions.</p><div class="bar"><button class="b" data-a="mod">Moderator mode: ${db.mod ? 'on' : 'off'}</button><button class="b" data-a="rst">Reset local prototype data</button></div>`;
 
     if (!currentUser) {
-        $('#app').innerHTML = '<h1>Account</h1><p class="mu">Accounts only store your saves, scores and favorites. This prototype has no passwords; the real site would use Supabase Auth.</p><input id="nm" placeholder="Pick a name" maxlength="20" aria-label="Name"><div class="bar"><button class="b p" data-a="login">Sign in</button></div>' + tools;
+        $('#app').innerHTML = `
+            <h1>Account</h1>
+            <p class="mu">Create an account or sign in with your email and password. Email confirmation may be required.</p>
+            ${authClient ? '' : '<p class="mu">Supabase is not configured. Add your project URL and publishable key in script.js, then redeploy.</p>'}
+            <label>Email <input id="auth-email" type="email" autocomplete="email" required></label>
+            <label>Password <input id="auth-password" type="password" autocomplete="new-password" minlength="6" required></label>
+            <div class="bar">
+                <button class="b p" data-a="signIn">Sign in</button>
+                <button class="b" data-a="signUp">Create account</button>
+            </div>
+            ${tools}
+        `;
         return;
     }
 
@@ -481,7 +496,8 @@ function account() {
 
     $('#app').innerHTML = `
         <h1>${escapeHtml(currentUser)}</h1>
-        <div class="bar"><button class="b" data-a="logout">Sign out</button></div>
+        <p class="mu">Signed in with Supabase. Published games and player data are not yet saved to the server.</p>
+        <div class="bar"><button class="b" data-a="signOut">Sign out</button></div>
         <h2>Favorites</h2>
         ${favoriteGames.length ? favoriteGames.map((gameId) => `<div class="row2"><a href="#play-${gameId}">${escapeHtml(titleForGame(gameId))}</a></div>`).join('') : '<p class="mu">Nothing yet.</p>'}
         <h2>Saved data</h2>
@@ -491,8 +507,6 @@ function account() {
                 <button class="b" data-a="clr" data-v="${escapeHtml(key)}">Clear</button>
             </div>
         `).join('') : '<p class="mu">No saves yet.</p>'}
-        <h2>Delete account</h2>
-        <button class="b" data-a="del">Delete account and data</button>
         ${tools}
     `;
 }
@@ -600,14 +614,50 @@ const actionHandlers = {
         toast('Rejected.');
         review();
     },
-    login() {
-        const name = $('#nm').value.replace(/\|/g, '').trim();
-        if (!name) return toast('Pick a name first.');
-        db.user = name.slice(0, 20);
-        saveData();
-        render();
+    async signUp() {
+        if (!authClient) return toast('Add your Supabase project URL and publishable key in script.js first.');
+        const email = $('#auth-email').value.trim();
+        const password = $('#auth-password').value;
+        if (!email || !password) return toast('Enter your email and password.');
+        if (password.length < 6) return toast('Use a password with at least 6 characters.');
+        try {
+            const { data, error } = await authClient.auth.signUp({
+                email,
+                password,
+                options: { emailRedirectTo: location.origin }
+            });
+            if (error) return toast(error.message);
+            if (data.session) {
+                db.user = data.user.email;
+                saveData();
+                render();
+                return toast('Account created and signed in.');
+            }
+            toast('Check your email to confirm your account, then sign in.');
+        } catch (error) {
+            toast(`Could not create account: ${error.message}`);
+        }
     },
-    logout() {
+    async signIn() {
+        if (!authClient) return toast('Add your Supabase project URL and publishable key in script.js first.');
+        const email = $('#auth-email').value.trim();
+        const password = $('#auth-password').value;
+        if (!email || !password) return toast('Enter your email and password.');
+        try {
+            const { data, error } = await authClient.auth.signInWithPassword({ email, password });
+            if (error) return toast(error.message);
+            db.user = data.user.email;
+            saveData();
+            render();
+            toast('Signed in.');
+        } catch (error) {
+            toast(`Could not sign in: ${error.message}`);
+        }
+    },
+    async signOut() {
+        if (!authClient) return toast('Supabase is not configured.');
+        const { error } = await authClient.auth.signOut();
+        if (error) return toast(error.message);
         db.user = '';
         saveData();
         render();
@@ -702,3 +752,27 @@ addEventListener('message', (event) => {
 
 addEventListener('hashchange', go);
 go();
+
+if (
+    window.supabase &&
+    SUPABASE_URL !== 'PASTE_YOUR_SUPABASE_PROJECT_URL_HERE' &&
+    SUPABASE_PUBLISHABLE_KEY !== 'PASTE_YOUR_SUPABASE_PUBLISHABLE_KEY_HERE'
+) {
+    authClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+    authClient.auth.onAuthStateChange((_event, session) => {
+        db.user = session?.user.email || '';
+        saveData();
+        render();
+    });
+    authClient.auth.getSession().then(({ data, error }) => {
+        if (error) {
+            toast(`Could not restore sign-in: ${error.message}`);
+            return;
+        }
+        db.user = data.session?.user.email || '';
+        saveData();
+        render();
+    });
+} else if (SUPABASE_URL !== 'PASTE_YOUR_SUPABASE_PROJECT_URL_HERE') {
+    toast('Supabase client library did not load. Check your internet connection and reload.');
+}
