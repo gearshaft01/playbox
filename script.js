@@ -18,6 +18,7 @@ let toastHandle;
 let activeTab = 'html';
 let currentRoute = { v: 'browse' };
 let authClient = null;
+let pendingRemoteGames = [];
 
 const toast = (message) => {
     const toastNode = $('#t');
@@ -156,6 +157,34 @@ const findGameVersion = (gameIdentifier) => {
     return [game, version];
 };
 
+const authenticatedApiRequest = async (path, options = {}) => {
+    if (!authClient) throw new Error('Supabase is not configured.');
+
+    const { data, error } = await authClient.auth.getSession();
+    if (error) throw error;
+    if (!data.session) throw new Error('Sign in before using moderation tools.');
+
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+        ...options,
+        headers: {
+            ...options.headers,
+            Authorization: `Bearer ${data.session.access_token}`
+        }
+    });
+
+    let result;
+    try {
+        result = await response.json();
+    } catch {
+        throw new Error(`The API returned an unreadable response (${response.status}).`);
+    }
+
+    if (!response.ok) {
+        throw new Error(result.error || `API request failed (${response.status}).`);
+    }
+    return result;
+};
+
 const board = (gameId) => {
     const leaderboard = $('#lb');
     if (!leaderboard) return;
@@ -167,7 +196,7 @@ const board = (gameId) => {
 };
 
 const renderNavigation = () => {
-    $('#nav').innerHTML = [['browse', 'Browse'], ['studio', 'Studio'], ...(db.mod ? [['review', 'Review']] : []), ['account', 'Account']]
+    $('#nav').innerHTML = [['browse', 'Browse'], ['studio', 'Studio'], ...((db.mod || db.user) ? [['review', 'Review']] : []), ['account', 'Account']]
         .map(([routeKey, label]) => `<a class="b${currentRoute.v == routeKey ? ' on' : ''}" href="#${routeKey}">${label}</a>`)
         .join('');
     $('#me').textContent = db.user || 'Guest';
@@ -453,22 +482,36 @@ async function ingest(files) {
     toast(warnings.length ? warnings[0] + (warnings.length > 1 ? ' (+' + (warnings.length - 1) + ' more)' : '') : 'Bundled ' + Object.keys(byName).length + ' file(s) into one game.');
 }
 
-function review() {
-    const pending = [];
-    db.games.forEach((game) => game.versions.forEach((version) => {
-        if (version.status == 'pending') pending.push([game, version]);
-    }));
+async function review() {
+    $('#app').innerHTML = '<h1>Review queue</h1><p class="mu">Checking moderator access…</p>';
 
-    $('#app').innerHTML = '<h1>Review queue</h1><p class="mu">Prototype: anyone can switch on moderator mode from Account. In production this is a protected role.</p><div id="rvw"></div>' +
-        (pending.length ? pending.map(([game, version]) => {
-            const previewDoc = buildGameDocument(version);
-            const warnings = scanCode(previewDoc);
-            const key = `${game.id}.${version.n}`;
-            return `<div class="row2"><div><b>${escapeHtml(version.title)}</b> v${version.n} by ${escapeHtml(game.author)}<div class="mu sm">${escapeHtml(version.desc)}</div><div>${(previewDoc.length / 1024).toFixed(1)} KB ${warnings.map((warning) => `<span class="chip wn">${escapeHtml(warning)}</span>`).join('') || '<span class="chip ok">no flags</span>'}</div><input id="r${game.id}${version.n}" placeholder="Reason (required to reject)" aria-label="Rejection reason"></div><div class="bar"><button class="b" data-a="rvp" data-v="${key}">Play</button><button class="b p" data-a="appr" data-v="${key}">Approve</button><button class="b" data-a="rej" data-v="${key}">Reject</button></div></div>`;
-        }).join('') : '<p>Nothing waiting for review.</p>') +
-        '<h2>Reports</h2>' + (db.reports.length ? db.reports.map((report) => `
-            <div class="row2"><span>${escapeHtml(titleForGame(report.id))}</span><span class="mu sm">reported by ${escapeHtml(report.by)}</span></div>
-        `).join('') : '<p class="mu">No reports.</p>');
+    try {
+        const result = await authenticatedApiRequest('/api/moderation/pending');
+        if (currentRoute.v !== 'review') return;
+        if (!Array.isArray(result.games)) throw new Error('The API returned an invalid review queue.');
+
+        const pending = result.games;
+        pendingRemoteGames = pending;
+        $('#app').innerHTML = '<h1>Review queue</h1><div id="rvw"></div>' +
+            (pending.length ? pending.map((game) => {
+                const version = {
+                    title: game.title,
+                    desc: game.description,
+                    color: game.color,
+                    html: game.html,
+                    css: game.css,
+                    js: game.js
+                };
+                const previewDoc = buildGameDocument(version);
+                const warnings = scanCode(previewDoc);
+                const key = `${game.game_id}.${game.version_number}`;
+                return `<div class="row2"><div><b>${escapeHtml(game.title)}</b> v${game.version_number} by ${escapeHtml(game.author)}<div class="mu sm">${escapeHtml(game.description)}</div><div>${(previewDoc.length / 1024).toFixed(1)} KB ${warnings.map((warning) => `<span class="chip wn">${escapeHtml(warning)}</span>`).join('') || '<span class="chip ok">no flags</span>'}</div><input id="r${game.game_id}${game.version_number}" placeholder="Reason (required to reject)" aria-label="Rejection reason"></div><div class="bar"><button class="b" data-a="rvp" data-v="${key}">Play</button><button class="b p" data-a="appr" data-v="${key}">Approve</button><button class="b" data-a="rej" data-v="${key}">Reject</button></div></div>`;
+            }).join('') : '<p>Nothing waiting for review.</p>') +
+            '<h2>Reports</h2><p class="mu">Report management is not connected to the server yet.</p>';
+    } catch (error) {
+        if (currentRoute.v !== 'review') return;
+        $('#app').innerHTML = `<h1>Review queue unavailable</h1><p class="mu">${escapeHtml(error.message)}</p>`;
+    }
 }
 
 function account() {
@@ -624,27 +667,58 @@ const actionHandlers = {
         studio();
     },
     rvp(value) {
-        const [, previewVersion] = findGameVersion(value);
+        const [gameId, versionNumber] = value.split('.');
+        const game = pendingRemoteGames.find((entry) =>
+            entry.game_id === gameId && String(entry.version_number) === versionNumber
+        );
+        if (!game) return toast('That pending game is no longer in the review queue.');
+        const previewVersion = {
+            title: game.title,
+            desc: game.description,
+            color: game.color,
+            html: game.html,
+            css: game.css,
+            js: game.js
+        };
         $('#rvw').innerHTML = '<div class="frame" style="margin-bottom:12px"><iframe id="rf" title="Review preview" sandbox="allow-scripts allow-pointer-lock"></iframe></div>';
         $('#rf').srcdoc = wrapDocument(buildGameDocument(previewVersion));
     },
-    appr(value) {
-        const [, version] = findGameVersion(value);
-        version.status = 'approved';
-        saveData();
-        toast('Approved and published.');
-        review();
+    async appr(value) {
+        const [gameId, versionNumber] = value.split('.');
+        try {
+            await authenticatedApiRequest(
+                `/api/moderation/games/${encodeURIComponent(gameId)}/versions/${encodeURIComponent(versionNumber)}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status: 'approved' })
+                }
+            );
+            toast('Approved and published.');
+            await review();
+        } catch (error) {
+            toast(`Could not approve game: ${error.message}`);
+        }
     },
-    rej(value) {
-        const [game, version] = findGameVersion(value);
-        const rejectReasonInput = $('#r' + game.id + version.n);
-        const reason = rejectReasonInput.value.trim();
+    async rej(value) {
+        const [gameId, versionNumber] = value.split('.');
+        const rejectReasonInput = document.getElementById(`r${gameId}${versionNumber}`);
+        const reason = rejectReasonInput?.value.trim();
         if (!reason) return toast('Add a reason to reject.');
-        version.status = 'rejected';
-        version.reason = reason;
-        saveData();
-        toast('Rejected.');
-        review();
+        try {
+            await authenticatedApiRequest(
+                `/api/moderation/games/${encodeURIComponent(gameId)}/versions/${encodeURIComponent(versionNumber)}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status: 'rejected', reason })
+                }
+            );
+            toast('Rejected.');
+            await review();
+        } catch (error) {
+            toast(`Could not reject game: ${error.message}`);
+        }
     },
     async signUp() {
         if (!authClient) return toast('Add your Supabase project URL and publishable key in script.js first.');
