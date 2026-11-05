@@ -205,7 +205,7 @@ const board = (gameId) => {
 };
 
 const renderNavigation = () => {
-    $('#nav').innerHTML = [['browse', 'Browse'], ['studio', 'Studio'], ...((db.mod || db.user) ? [['review', 'Review']] : []), ['account', 'Account']]
+    $('#nav').innerHTML = [['browse', 'Browse'], ['studio', 'Studio'], ['docs', 'Game API'], ...((db.mod || db.user) ? [['review', 'Review']] : []), ['account', 'Account']]
         .map(([routeKey, label]) => `<a class="b${currentRoute.v == routeKey ? ' on' : ''}" href="#${routeKey}">${label}</a>`)
         .join('');
     $('#me').textContent = publicUsername || (db.user ? 'Signed in' : 'Guest');
@@ -228,7 +228,7 @@ function go() {
 
 function render() {
     renderNavigation();
-    const views = { browse, play, studio, review, account };
+    const views = { browse, play, studio, docs, review, account };
     (views[currentRoute.v] || browse)();
 }
 
@@ -506,6 +506,74 @@ function studio() {
     fillStudioInputs();
     renderStudioProjects();
     loadStudioProjects();
+}
+
+function docs() {
+    const examples = [
+        {
+            name: 'Playbox.getUser()',
+            signature: 'Playbox.getUser() -> Promise<{ name: string }>',
+            description: 'Gets the current player label. The name is the signed-in email or "guest"; the saved public username is not currently available through the game SDK. Avoid displaying this value publicly.',
+            example: `const user = await Playbox.getUser();\nconsole.log(user.name);`
+        },
+        {
+            name: 'Playbox.saveData(data)',
+            signature: 'Playbox.saveData(data) -> Promise<boolean>',
+            description: 'Saves JSON-serializable progress for this player and game in this browser. Resolves true when saved, or false if it exceeds the roughly 100 KB limit.',
+            example: `const saved = await Playbox.saveData({ level: 4, coins: 25 });\nif (!saved) console.log('Save is too large.');`
+        },
+        {
+            name: 'Playbox.loadData()',
+            signature: 'Playbox.loadData() -> Promise<any | null>',
+            description: 'Loads this player’s saved data for this game from this browser. Resolves to the saved value, or null when no save exists.',
+            example: `const data = await Playbox.loadData();\nconst level = data?.level ?? 1;`
+        },
+        {
+            name: 'Playbox.submitScore(score)',
+            signature: 'Playbox.submitScore(score) -> Promise<boolean>',
+            description: 'Submits a finite numeric score to the game’s leaderboard. Scores are currently stored in this browser only; up to 50 scores are kept per game.',
+            example: `const score = 1200;\nawait Playbox.submitScore(score);`
+        }
+    ];
+
+    $('#app').innerHTML = `
+        <h1>Game API</h1>
+        <p class="mu">Use these methods in your game JavaScript. Playbox is injected into games in Browse, Play, and Studio preview.</p>
+        <div class="bar"><a class="b" href="#studio">Back to Studio</a></div>
+        <div class="docs-notice">
+            <b>Current storage limits</b>
+            <p>Game saves and scores are stored in the current browser and are not synced across devices or uploaded to the Playbox database yet. Player account usernames are used for published game attribution, but the game SDK does not currently provide a username lookup.</p>
+        </div>
+        <h2>Available methods</h2>
+        <div class="docs-list">
+            ${examples.map((entry) => `
+                <article class="docs-method">
+                    <h3>${escapeHtml(entry.name)}</h3>
+                    <code class="docs-signature">${escapeHtml(entry.signature)}</code>
+                    <p>${escapeHtml(entry.description)}</p>
+                    <pre><code>${escapeHtml(entry.example)}</code></pre>
+                </article>
+            `).join('')}
+        </div>
+        <h2>Complete example</h2>
+        <pre class="docs-example"><code>${escapeHtml(`async function startGame() {
+  const user = await Playbox.getUser();
+  const saved = await Playbox.loadData();
+  let score = saved?.bestScore ?? 0;
+
+  document.querySelector('#player').textContent = user.name;
+  document.querySelector('#score').textContent = score;
+
+  function finishGame(finalScore) {
+    Playbox.submitScore(finalScore);
+    if (finalScore > score) {
+      score = finalScore;
+      Playbox.saveData({ bestScore: score });
+    }
+  }
+}`)}</code></pre>
+        <p class="mu sm">These methods return Promises, so use <code>await</code> or <code>.then(...)</code>. Games run in a sandbox and cannot make direct network requests.</p>
+    `;
 }
 
 async function ingest(files) {
