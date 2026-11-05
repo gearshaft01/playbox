@@ -12,6 +12,48 @@ const API_BASE_URL = 'https://playbox-api.gearshaft01.workers.dev';
 const SUPABASE_URL = 'https://gahjnjpockmwhozouyew.supabase.co';
 const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_hGku3vvs1IlHqswTc3MvBg_gAkF-vOR';
 const getColor = (color) => (/^#[0-9a-f]{6}$/i.test(color) ? color : '#3d34e8');
+const CONTACT_EMAIL = ''; // shown on the privacy page and used for takedown requests; set before launch
+let lastUserId = '';
+
+const safeImageUrl = (url) => (typeof url === 'string' && /^https:\/\/[^\s"'<>]+$/.test(url) ? url : '');
+const tagList = (value) => (Array.isArray(value) ? value : String(value || '').split(','))
+    .map((tag) => String(tag).trim().toLowerCase().replace(/[^a-z0-9 -]/g, ''))
+    .filter((tag, index, all) => tag.length >= 2 && tag.length <= 20 && all.indexOf(tag) === index)
+    .slice(0, 5);
+const thumbMarkup = (item) => {
+    const source = /^data:image\/jpeg;base64,[A-Za-z0-9+\/=]+$/.test(item.thumbData || '')
+        ? item.thumbData
+        : safeImageUrl(item.thumb_url);
+    return source
+        ? `<img src="${source}" alt="" loading="lazy">`
+        : escapeHtml((item.title || '?')[0] || '?');
+};
+const shrinkImage = (file) => new Promise((resolve, reject) => {
+    if (!/^image\/(png|jpeg|webp)$/.test(file.type) || file.size > 5e6) return reject(new Error('Unsupported image'));
+    const reader = new FileReader();
+    reader.onerror = reject;
+    reader.onload = () => {
+        const image = new Image();
+        image.onerror = reject;
+        image.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = 480;
+            canvas.height = 300;
+            const scale = Math.max(480 / image.width, 300 / image.height);
+            const width = image.width * scale;
+            const height = image.height * scale;
+            canvas.getContext('2d').drawImage(image, (480 - width) / 2, (300 - height) / 2, width, height);
+            resolve(canvas.toDataURL('image/jpeg', 0.82));
+        };
+        image.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+});
+const refreshCardPreview = () => {
+    const card = $('#pc');
+    if (!card) return;
+    card.innerHTML = `<div class="th" style="background:${getColor(draft.color)}">${thumbMarkup(draft)}</div><div class="ct"><b>${escapeHtml(draft.title || 'Untitled')}</b><span class="mu sm">♥ 0</span></div><div class="mu sm dd" style="padding:0 12px 10px">${escapeHtml(draft.desc || '')}</div>`;
+};
 
 let memory = null;
 let toastHandle;
@@ -98,6 +140,11 @@ const starterTemplate = {
     id: null,
     title: 'Tap counter',
     desc: 'My first game.',
+    about: '',
+    tags: '',
+    thumbData: '',
+    thumb_url: '',
+    removeThumb: false,
     color: '#3d34e8',
     html: '<h1>Tap counter</h1>\n<button id="b">Tap</button>\n<p id="n"></p>',
     css: 'body{font-family:system-ui;text-align:center;padding:40px;background:#f2f4fb;color:#181b34}\nbutton{font-size:28px;padding:16px 32px;border-radius:12px;border:0;background:#3d34e8;color:#fff}',
@@ -134,13 +181,13 @@ const loadData = () => {
 };
 
 let db = loadData() || seedData();
-let draft = db.draft || { ...starterTemplate };
+let draft = { ...starterTemplate, ...(db.draft || {}) };
 db.user = '';
 
 const saveData = () => {
     memory = db;
     try {
-        localStorage.setItem(KEY, JSON.stringify(db));
+        localStorage.setItem(KEY, JSON.stringify({ ...db, user: '' }));
     } catch (error) {
         // Ignore storage errors in the prototype app.
     }
@@ -283,7 +330,7 @@ function go() {
 
 function render() {
     renderNavigation();
-    const views = { browse, play, studio, docs, review, account };
+    const views = { browse, play, studio, docs, review, account, privacy };
     (views[currentRoute.v] || browse)();
 }
 
@@ -297,17 +344,19 @@ async function browse() {
             .filter(({ game, version }) => `${version.title} ${publicAuthor(game.author)}`.toLowerCase().includes(query))
             .map(({ game, version }) => `
                 <a class="card" href="#play-${game.id}">
-                    <div class="th" style="background:${getColor(version.color)}">${escapeHtml(version.title[0] || '?')}</div>
+                    <div class="th" style="background:${getColor(version.color)}">${thumbMarkup(version)}</div>
                     <div class="ct"><b>${escapeHtml(version.title)}</b><span class="mu sm">♥ ${countLikes(game.id)}</span></div>
+                    <div class="mu sm dd" style="padding:0 12px 4px">${escapeHtml(version.desc || '')}</div>
                     <div class="mu sm" style="padding:0 12px 10px">by ${escapeHtml(publicAuthor(game.author))}</div>
                 </a>
             `);
         const remoteCards = remoteGames
-            .filter((game) => `${game.title} ${publicAuthor(game.author)}`.toLowerCase().includes(query))
+            .filter((game) => `${game.title} ${publicAuthor(game.author)} ${tagList(game.tags).join(' ')}`.toLowerCase().includes(query))
             .map((game) => `
                 <a class="card" href="#play-api-${encodeURIComponent(game.id)}">
-                    <div class="th" style="background:${getColor(game.color)}">${escapeHtml(game.title[0] || '?')}</div>
+                    <div class="th" style="background:${getColor(game.color)}">${thumbMarkup(game)}</div>
                     <div class="ct"><b>${escapeHtml(game.title)}</b></div>
+                    <div class="mu sm dd" style="padding:0 12px 4px">${escapeHtml(game.description || '')}</div>
                     <div class="mu sm" style="padding:0 12px 10px">by ${escapeHtml(publicAuthor(game.author))}</div>
                 </a>
             `);
@@ -369,7 +418,9 @@ async function play() {
                 color: remoteVersion.color,
                 html: remoteVersion.html,
                 css: remoteVersion.css,
-                js: remoteVersion.js
+                js: remoteVersion.js,
+                about: remoteVersion.about || '',
+                tags: remoteVersion.tags || []
             };
         } catch (error) {
             if (currentRoute.v !== 'play' || currentRoute.id !== requestedGameId) return;
@@ -394,6 +445,8 @@ async function play() {
             <button class="b" data-a="rep">Report</button>
         </div>
         <p>${escapeHtml(version.desc)}</p>
+        <div>${tagList(version.tags).map((tag) => `<span class="chip mu">${escapeHtml(tag)}</span>`).join('')}</div>
+        ${version.about ? `<h2>About this game</h2><p class="about">${escapeHtml(version.about)}</p>` : ''}
         <h2>Top scores</h2>
         <div id="lb"></div>
         <p class="mu sm">${db.user ? 'Signed in as ' + escapeHtml(publicUsername || 'Player') + '. Your progress is saved to your account.' : 'Playing as guest. Your progress is saved locally only.'}</p>
@@ -411,7 +464,9 @@ const runPreview = () => {
         ? warnings.map((warning) => `<span class="chip wn">${escapeHtml(warning)}</span>`).join('')
         : '<span class="chip ok">No problems found</span>') + `<span class="mu sm">${(source.length / 1024).toFixed(1)} KB of 5 MB</span>`;
 
+    refreshCardPreview();
     db.draft = draft;
+    db.draftUser = db.user;
     saveData();
 };
 
@@ -425,6 +480,8 @@ const fillStudioInputs = () => {
     $('#ti').value = draft.title;
     $('#ds').value = draft.desc;
     $('#co').value = getColor(draft.color);
+    $('#ab').value = draft.about || '';
+    $('#tg').value = draft.tags || '';
     $('#ed').value = draft[activeTab];
     runPreview();
 };
@@ -529,9 +586,25 @@ function studio() {
                         <div id="fl"></div>
                     </div>
                 </div>
+                <h2>Game page</h2>
+                <div class="gp">
+                    <div>
+                        <input id="ds" maxlength="120" placeholder="One-line description shown on the card" aria-label="Description">
+                        <textarea id="ab" class="in" maxlength="2000" placeholder="About this game: how to play, controls, credits" aria-label="About this game"></textarea>
+                        <input id="tg" placeholder="Tags, separated by commas (up to 5)" aria-label="Tags">
+                    </div>
+                    <div>
+                        <div class="card" id="pc"></div>
+                        <div class="bar">
+                            <button class="b" data-a="thb">Choose thumbnail</button>
+                            <button class="b" data-a="thx">Remove</button>
+                        </div>
+                        <label class="mu sm">Fallback color <input id="co" type="color"></label>
+                        <input id="tf" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+                        <p class="mu sm">Cropped to 8:5 and shrunk to 480×300. Moderators review it together with your game.</p>
+                    </div>
+                </div>
                 <h2>Submit for review</h2>
-                <input id="ds" placeholder="Short description" aria-label="Description">
-                <div class="bar"><label class="mu">Thumbnail color <input id="co" type="color"></label></div>
                 <button class="b p" data-a="sub">Submit for review</button>
                 <span class="mu sm">${db.user ? 'Signed in as ' + escapeHtml(publicUsername || 'Player') + '.' : 'Sign in on the Account page to submit.'}</span>
             </div>
@@ -554,6 +627,26 @@ function studio() {
         draft.color = event.target.value;
         triggerPreview();
     };
+    $('#ab').oninput = (event) => {
+        draft.about = event.target.value;
+        triggerPreview();
+    };
+    $('#tg').oninput = (event) => {
+        draft.tags = event.target.value;
+        triggerPreview();
+    };
+    $('#tf').onchange = async (event) => {
+        const file = event.target.files[0];
+        event.target.value = '';
+        if (!file) return;
+        try {
+            draft.thumbData = await shrinkImage(file);
+            draft.removeThumb = false;
+            runPreview();
+        } catch (error) {
+            toast('Couldn’t read that image. Use a PNG, JPEG or WebP under 5 MB.');
+        }
+    };
     $('#up').onchange = async (event) => {
         await ingest(event.target.files);
         event.target.value = '';
@@ -568,7 +661,7 @@ function docs() {
         {
             name: 'Playbox.getUser()',
             signature: 'Playbox.getUser() -> Promise<{ name: string }>',
-            description: 'Gets the current player label. The name is the signed-in email or "guest"; the saved public username is not currently available through the game SDK. Avoid displaying this value publicly.',
+            description: 'Gets the player’s public name: their Playbox username when signed in, otherwise "Player". It is never an email address.',
             example: `const user = await Playbox.getUser();\nconsole.log(user.name);`
         },
         {
@@ -597,7 +690,7 @@ function docs() {
         <div class="bar"><a class="b" href="#studio">Back to Studio</a></div>
         <div class="docs-notice">
             <b>Current storage limits</b>
-            <p>Game saves and scores are stored in the current browser and are not synced across devices or uploaded to the Playbox database yet. Player account usernames are used for published game attribution, but the game SDK does not currently provide a username lookup.</p>
+            <p>Game saves and scores are stored in the current browser and are not synced across devices or uploaded to the Playbox database yet. Games only ever see a player’s public username, never their email.</p>
         </div>
         <h2>Available methods</h2>
         <div class="docs-list">
@@ -719,13 +812,29 @@ async function review() {
                 const previewDoc = buildGameDocument(version);
                 const warnings = scanCode(previewDoc);
                 const key = `${game.game_id}.${game.version_number}`;
-                return `<div class="row2"><div><b>${escapeHtml(game.title)}</b> v${game.version_number} by ${escapeHtml(publicAuthor(game.author))}<div class="mu sm">${escapeHtml(game.description)}</div><div>${(previewDoc.length / 1024).toFixed(1)} KB ${warnings.map((warning) => `<span class="chip wn">${escapeHtml(warning)}</span>`).join('') || '<span class="chip ok">no flags</span>'}</div><input id="r${game.game_id}${game.version_number}" placeholder="Reason (required to reject)" aria-label="Rejection reason"></div><div class="bar"><button class="b" data-a="rvp" data-v="${key}">Play</button><button class="b p" data-a="appr" data-v="${key}">Approve</button><button class="b" data-a="rej" data-v="${key}">Reject</button></div></div>`;
+                return `<div class="row2"><div><b>${escapeHtml(game.title)}</b> v${game.version_number} by ${escapeHtml(publicAuthor(game.author))}<div class="mu sm">${escapeHtml(game.description)}</div>${tagList(game.tags).map((tag) => `<span class="chip mu">${escapeHtml(tag)}</span>`).join('')}${game.about ? `<div class="mu sm about">${escapeHtml(game.about)}</div>` : ''}${safeImageUrl(game.thumb_url) ? `<img class="review-thumb" src="${safeImageUrl(game.thumb_url)}" alt="Submitted thumbnail" width="160">` : '<span class="chip wn">no thumbnail</span>'}<div>${(previewDoc.length / 1024).toFixed(1)} KB ${warnings.map((warning) => `<span class="chip wn">${escapeHtml(warning)}</span>`).join('') || '<span class="chip ok">no flags</span>'}</div><input id="r${game.game_id}${game.version_number}" placeholder="Reason (required to reject)" aria-label="Rejection reason"></div><div class="bar"><button class="b" data-a="rvp" data-v="${key}">Play</button><button class="b p" data-a="appr" data-v="${key}">Approve</button><button class="b" data-a="rej" data-v="${key}">Reject</button></div></div>`;
             }).join('') : '<p>Nothing waiting for review.</p>') +
             '<h2>Reports</h2><p class="mu">Report management is not connected to the server yet.</p>';
     } catch (error) {
         if (currentRoute.v !== 'review') return;
         $('#app').innerHTML = `<h1>Review queue unavailable</h1><p class="mu">${escapeHtml(error.message)}</p>`;
     }
+}
+
+function privacy() {
+    $('#app').innerHTML = `
+        <h1>Privacy</h1>
+        <p class="mu">A plain-language summary of what Playbox stores.</p>
+        <h2>What we store</h2>
+        <p>Your email address (used only to sign in and never shown to other people), your public username, and the games you submit, including their descriptions and thumbnails. Game saves, scores and favorites currently stay in your own browser.</p>
+        <h2>What other people see</h2>
+        <p>Your username next to games you publish. Games run in a sandbox and never receive your email address.</p>
+        <h2>Age</h2>
+        <p>Playbox is for people 13 and older.</p>
+        <h2>Deleting your data</h2>
+        <p>You can delete your account from the Account page. That removes your account, games, versions and thumbnails.</p>
+        ${CONTACT_EMAIL ? `<h2>Contact</h2><p>Questions, privacy requests and takedown notices: <a href="mailto:${escapeHtml(CONTACT_EMAIL)}">${escapeHtml(CONTACT_EMAIL)}</a></p>` : ''}
+    `;
 }
 
 async function account() {
@@ -741,6 +850,7 @@ async function account() {
             <div class="auth-form">
                 <label>Email <input id="auth-email" type="email" autocomplete="email" required></label>
                 <label>Password <input id="auth-password" type="password" autocomplete="new-password" minlength="6" required></label>
+                <label class="check"><input id="age-ok" type="checkbox"> <span>I’m 13 or older and agree to the <a href="#privacy">privacy policy</a> (required to create an account).</span></label>
             </div>
             <div class="bar">
                 <button class="b p" data-a="signIn">Sign in</button>
@@ -786,6 +896,10 @@ async function account() {
                 <button class="b" data-a="clr" data-v="${escapeHtml(key)}">Clear</button>
             </div>
         `).join('') : '<p class="mu">No saves yet.</p>'}
+        <h2>Delete account</h2>
+        <p class="mu">This permanently deletes your account, your games with every version and thumbnail, and your username. It can’t be undone.</p>
+        <button class="b" data-a="deleteAccount">Delete my account</button>
+        <p class="mu sm"><a href="#privacy">Privacy policy</a></p>
         ${tools}
     `;
 }
@@ -809,15 +923,37 @@ const actionHandlers = {
         const requestFullscreen = frame.requestFullscreen && frame.requestFullscreen();
         if (requestFullscreen && requestFullscreen.catch) requestFullscreen.catch(() => toast('Fullscreen isn’t available here.'));
     },
-    rep() {
-        db.reports.push({ id: currentRoute.id, by: displayName() });
-        saveData();
-        toast('Reported. A moderator will take a look.');
+    async rep() {
+        if (!currentRoute.remote) {
+            db.reports.push({ id: currentRoute.id, by: displayName() });
+            saveData();
+            return toast('Reported. A moderator will take a look.');
+        }
+        if (!db.user) return toast('Sign in to report a game.');
+        try {
+            await authenticatedApiRequest(`/api/games/${encodeURIComponent(currentRoute.id)}/reports`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reason: 'Reported from the play page' })
+            });
+            toast('Reported. A moderator will take a look.');
+        } catch (error) {
+            toast(`Could not send report: ${error.message}`);
+        }
     },
     tab(value) {
         activeTab = value;
         $('#ed').value = draft[value];
         document.querySelectorAll('[data-a=tab]').forEach((button) => button.classList.toggle('on', button.dataset.v == value));
+    },
+    thb() {
+        $('#tf').click();
+    },
+    thx() {
+        draft.thumbData = '';
+        draft.thumb_url = '';
+        draft.removeThumb = true;
+        runPreview();
     },
     upl() {
         $('#up').click();
@@ -830,6 +966,7 @@ const actionHandlers = {
         if (!db.user) return toast('Sign in on the Account page to submit.');
         if (!publicUsername) return toast('Choose and save a public username on the Account page before submitting.');
         if (!draft.title.trim()) return toast('Add a title.');
+        if (!draft.desc.trim()) return toast('Add a one-line description.');
         if (!draft.js.trim() && !draft.html.trim()) return toast('Nothing to submit yet.');
         if (new TextEncoder().encode(draft.html + draft.css + draft.js).length > 1_800_000) {
             return toast('This game is too large for D1 storage. The limit is about 1.8 MB.');
@@ -851,7 +988,11 @@ const actionHandlers = {
                     color: getColor(draft.color),
                     html: draft.html,
                     css: draft.css,
-                    js: draft.js
+                    js: draft.js,
+                    about: (draft.about || '').trim(),
+                    tags: tagList(draft.tags),
+                    thumbnail: draft.thumbData || undefined,
+                    remove_thumbnail: draft.removeThumb && !draft.thumbData ? true : undefined
                 })
             });
             if (isNewProject) {
@@ -865,6 +1006,10 @@ const actionHandlers = {
 
             selectedStudioProjectId = draft.id;
             saveData();
+            draft.thumb_url = typeof result.thumb_url === 'string' ? result.thumb_url : draft.thumb_url;
+            draft.thumbData = '';
+            draft.removeThumb = false;
+            refreshCardPreview();
             toast(`Version ${result.version_number || 1} submitted for review.`);
             await loadStudioProjects();
         } catch (error) {
@@ -882,7 +1027,12 @@ const actionHandlers = {
             color: project.color,
             html: project.html,
             css: project.css,
-            js: project.js
+            js: project.js,
+            about: project.about || '',
+            tags: tagList(project.tags).join(', '),
+            thumb_url: project.thumb_url || '',
+            thumbData: '',
+            removeThumb: false
         };
         selectedStudioProjectId = project.id;
         fillStudioInputs();
@@ -1000,6 +1150,7 @@ const actionHandlers = {
         const password = $('#auth-password').value;
         if (!email || !password) return toast('Enter your email and password.');
         if (password.length < 6) return toast('Use a password with at least 6 characters.');
+        if (!$('#age-ok').checked) return toast('Please confirm you’re 13 or older and agree to the privacy policy.');
         try {
             const { data, error } = await authClient.auth.signUp({
                 email,
@@ -1008,7 +1159,7 @@ const actionHandlers = {
             });
             if (error) return toast(error.message);
             if (data.session) {
-                db.user = data.user.email;
+                db.user = data.user.id;
                 saveData();
                 render();
                 return toast('Account created and signed in.');
@@ -1026,7 +1177,7 @@ const actionHandlers = {
         try {
             const { data, error } = await authClient.auth.signInWithPassword({ email, password });
             if (error) return toast(error.message);
-            db.user = data.user.email;
+            db.user = data.user.id;
             saveData();
             render();
             toast('Signed in.');
@@ -1064,6 +1215,29 @@ const actionHandlers = {
         } catch (error) {
             toast(`Could not save username: ${error.message}`);
         }
+    },
+    async deleteAccount(_, button) {
+        if (button.dataset.c !== '1') {
+            button.dataset.c = '1';
+            button.textContent = 'Click again to permanently delete';
+            return;
+        }
+        button.disabled = true;
+        try {
+            await authenticatedApiRequest('/api/account', { method: 'DELETE' });
+        } catch (error) {
+            button.disabled = false;
+            return toast(`Could not delete account: ${error.message}`);
+        }
+        const userId = db.user;
+        Object.keys(db.saves).forEach((key) => key.startsWith(userId + '|') && delete db.saves[key]);
+        delete db.favs[userId];
+        draft = { ...starterTemplate };
+        db.draft = null;
+        saveData();
+        await authClient.auth.signOut({ scope: 'local' });
+        toast('Your account and data were deleted.');
+        location.hash = '#browse';
     },
     clr(key) {
         delete db.saves[key];
@@ -1119,7 +1293,7 @@ addEventListener('message', (event) => {
     const saveKey = displayName() + '|' + id;
     let response = null;
 
-    if (message.t == 'user') response = { name: displayName() };
+    if (message.t == 'user') response = { name: publicUsername || 'Player' };
     else if (message.t == 'save') {
         const serialized = JSON.stringify(message.d);
         response = !!serialized && serialized.length <= 102400;
@@ -1135,7 +1309,7 @@ addEventListener('message', (event) => {
         }
     } else if (message.t == 'score' && typeof message.d == 'number' && isFinite(message.d)) {
         const scores = (db.scores[id] = db.scores[id] || []);
-        scores.push({ u: displayName(), s: message.d });
+        scores.push({ u: publicUsername || 'Guest', s: message.d });
         scores.sort((left, right) => right.s - left.s);
         scores.length = Math.min(scores.length, 50);
         saveData();
@@ -1158,17 +1332,40 @@ go();
 
 if (window.supabase && SUPABASE_URL && SUPABASE_PUBLISHABLE_KEY) {
     authClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
-    const syncAuthSession = (session) => {
+    let syncToken = 0;
+    const syncAuthSession = async (session) => {
         const userId = session?.user.id || '';
-        if (userId !== moderatorUserId) resetModeratorAccess();
+        if (userId === lastUserId) return; // token refresh or tab refocus: nothing changed
+        const token = ++syncToken;
+        lastUserId = userId;
+        resetModeratorAccess();
         moderatorUserId = userId;
-        db.user = session?.user.email || '';
+        if (db.draftUser && db.draftUser !== userId) {
+            // A different person (or nobody) is signed in now: drop the previous user's draft and projects.
+            draft = { ...starterTemplate };
+            db.draft = null;
+            db.draftUser = '';
+            studioProjects = [];
+            selectedStudioProjectId = '';
+        }
+        db.user = userId;
         publicUsername = '';
         saveData();
         render();
-        if (userId) checkModeratorAccess();
+        if (!userId) return;
+        try {
+            const me = await authenticatedApiRequest('/api/profile');
+            if (token !== syncToken) return;
+            publicUsername = typeof me.username === 'string' ? me.username : '';
+            if (me.is_moderator === true) moderatorAccess = true; // only shows the nav link; the server still enforces it
+            else if (me.is_moderator === undefined) checkModeratorAccess(); // older API: fall back to probing the queue
+        } catch (error) {
+            // Account page shows profile errors.
+        }
+        if (token === syncToken) renderNavigation();
     };
-    authClient.auth.onAuthStateChange((_event, session) => syncAuthSession(session));
+    // setTimeout avoids a supabase-js deadlock when a callback makes further Supabase calls.
+    authClient.auth.onAuthStateChange((_event, session) => setTimeout(() => syncAuthSession(session), 0));
     authClient.auth.getSession().then(({ data, error }) => {
         if (error) {
             toast(`Could not restore sign-in: ${error.message}`);
