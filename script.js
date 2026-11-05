@@ -19,6 +19,7 @@ let activeTab = 'html';
 let currentRoute = { v: 'browse' };
 let authClient = null;
 let pendingRemoteGames = [];
+let publicUsername = '';
 
 const toast = (message) => {
     const toastNode = $('#t');
@@ -139,6 +140,12 @@ const saveData = () => {
 };
 
 const displayName = () => db.user || 'guest';
+const publicAuthor = (author) => {
+    if (typeof author !== 'string' || !author) return 'Player';
+    if (author === db.user && publicUsername) return publicUsername;
+    if (/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(author) || author.includes('@')) return 'Player';
+    return author || 'Player';
+};
 const getPublicVersion = (game) => [...game.versions].reverse().find((version) => version.status === 'approved');
 const publishedGames = () => db.games
     .map((game) => ({ game, version: getPublicVersion(game) }))
@@ -199,7 +206,7 @@ const renderNavigation = () => {
     $('#nav').innerHTML = [['browse', 'Browse'], ['studio', 'Studio'], ...((db.mod || db.user) ? [['review', 'Review']] : []), ['account', 'Account']]
         .map(([routeKey, label]) => `<a class="b${currentRoute.v == routeKey ? ' on' : ''}" href="#${routeKey}">${label}</a>`)
         .join('');
-    $('#me').textContent = db.user || 'Guest';
+    $('#me').textContent = publicUsername || (db.user ? 'Signed in' : 'Guest');
 };
 
 function go() {
@@ -228,21 +235,21 @@ async function browse() {
     const redrawCatalog = () => {
         const query = $('#q').value.toLowerCase();
         const localCards = publishedGames()
-            .filter(({ game, version }) => `${version.title} ${game.author}`.toLowerCase().includes(query))
+            .filter(({ game, version }) => `${version.title} ${publicAuthor(game.author)}`.toLowerCase().includes(query))
             .map(({ game, version }) => `
                 <a class="card" href="#play-${game.id}">
                     <div class="th" style="background:${getColor(version.color)}">${escapeHtml(version.title[0] || '?')}</div>
                     <div class="ct"><b>${escapeHtml(version.title)}</b><span class="mu sm">♥ ${countLikes(game.id)}</span></div>
-                    <div class="mu sm" style="padding:0 12px 10px">by ${escapeHtml(game.author)}</div>
+                    <div class="mu sm" style="padding:0 12px 10px">by ${escapeHtml(publicAuthor(game.author))}</div>
                 </a>
             `);
         const remoteCards = remoteGames
-            .filter((game) => `${game.title} ${game.author}`.toLowerCase().includes(query))
+            .filter((game) => `${game.title} ${publicAuthor(game.author)}`.toLowerCase().includes(query))
             .map((game) => `
                 <a class="card" href="#play-api-${encodeURIComponent(game.id)}">
                     <div class="th" style="background:${getColor(game.color)}">${escapeHtml(game.title[0] || '?')}</div>
                     <div class="ct"><b>${escapeHtml(game.title)}</b></div>
-                    <div class="mu sm" style="padding:0 12px 10px">by ${escapeHtml(game.author)}</div>
+                    <div class="mu sm" style="padding:0 12px 10px">by ${escapeHtml(publicAuthor(game.author))}</div>
                 </a>
             `);
         $('#gr').innerHTML = [...localCards, ...remoteCards].join('') || '<p class="mu">No games match.</p>';
@@ -310,7 +317,7 @@ async function play() {
     const isFavorite = (db.favs[displayName()] || []).includes(game.id);
     $('#app').innerHTML = `
         <h1>${escapeHtml(version.title)}</h1>
-        <p class="mu">by ${escapeHtml(game.author)}, version ${version.n}</p>
+        <p class="mu">by ${escapeHtml(publicAuthor(game.author))}, version ${version.n}</p>
         <div class="frame"><iframe id="pf" title="${escapeHtml(version.title)}" sandbox="allow-scripts allow-pointer-lock" allow="fullscreen"></iframe></div>
         <div class="bar">
             <button class="b" data-a="fav">${isFavorite ? '♥ Favorited' : '♡ Favorite'}</button>
@@ -320,7 +327,7 @@ async function play() {
         <p>${escapeHtml(version.desc)}</p>
         <h2>Top scores</h2>
         <div id="lb"></div>
-        <p class="mu sm">${db.user ? 'Playing as ' + escapeHtml(db.user) + '. Your progress is saved to your account.' : 'Playing as guest. Your progress is saved locally only.'}</p>
+        <p class="mu sm">${db.user ? 'Signed in as ' + escapeHtml(publicUsername || 'Player') + '. Your progress is saved to your account.' : 'Playing as guest. Your progress is saved locally only.'}</p>
     `;
 
     $('#pf').srcdoc = wrapDocument(buildGameDocument(version));
@@ -380,7 +387,7 @@ function studio() {
         <h2>Submit for review</h2>
         <input id="ds" placeholder="Short description" aria-label="Description">
         <div class="bar"><label class="mu">Thumbnail color <input id="co" type="color"></label></div>
-        <button class="b p" data-a="sub">Submit for review</button> <span class="mu sm">${db.user ? 'Signed in as ' + escapeHtml(db.user) + '.' : 'Sign in on the Account page to submit.'}</span>
+        <button class="b p" data-a="sub">Submit for review</button> <span class="mu sm">${db.user ? 'Signed in as ' + escapeHtml(publicUsername || 'Player') + '.' : 'Sign in on the Account page to submit.'}</span>
         <h2>My games</h2>
         ${ownedGames.length ? ownedGames.map((game) => `
             <div class="row2">
@@ -505,7 +512,7 @@ async function review() {
                 const previewDoc = buildGameDocument(version);
                 const warnings = scanCode(previewDoc);
                 const key = `${game.game_id}.${game.version_number}`;
-                return `<div class="row2"><div><b>${escapeHtml(game.title)}</b> v${game.version_number} by ${escapeHtml(game.author)}<div class="mu sm">${escapeHtml(game.description)}</div><div>${(previewDoc.length / 1024).toFixed(1)} KB ${warnings.map((warning) => `<span class="chip wn">${escapeHtml(warning)}</span>`).join('') || '<span class="chip ok">no flags</span>'}</div><input id="r${game.game_id}${game.version_number}" placeholder="Reason (required to reject)" aria-label="Rejection reason"></div><div class="bar"><button class="b" data-a="rvp" data-v="${key}">Play</button><button class="b p" data-a="appr" data-v="${key}">Approve</button><button class="b" data-a="rej" data-v="${key}">Reject</button></div></div>`;
+                return `<div class="row2"><div><b>${escapeHtml(game.title)}</b> v${game.version_number} by ${escapeHtml(publicAuthor(game.author))}<div class="mu sm">${escapeHtml(game.description)}</div><div>${(previewDoc.length / 1024).toFixed(1)} KB ${warnings.map((warning) => `<span class="chip wn">${escapeHtml(warning)}</span>`).join('') || '<span class="chip ok">no flags</span>'}</div><input id="r${game.game_id}${game.version_number}" placeholder="Reason (required to reject)" aria-label="Rejection reason"></div><div class="bar"><button class="b" data-a="rvp" data-v="${key}">Play</button><button class="b p" data-a="appr" data-v="${key}">Approve</button><button class="b" data-a="rej" data-v="${key}">Reject</button></div></div>`;
             }).join('') : '<p>Nothing waiting for review.</p>') +
             '<h2>Reports</h2><p class="mu">Report management is not connected to the server yet.</p>';
     } catch (error) {
@@ -514,11 +521,12 @@ async function review() {
     }
 }
 
-function account() {
+async function account() {
     const currentUser = db.user;
     const tools = `<h2>Prototype tools</h2><p class="mu sm">These controls affect only this browser. Moderator mode does not grant server permissions.</p><div class="bar"><button class="b" data-a="mod">Moderator mode: ${db.mod ? 'on' : 'off'}</button><button class="b" data-a="rst">Reset local prototype data</button></div>`;
 
     if (!currentUser) {
+        publicUsername = '';
         $('#app').innerHTML = `
             <h1>Account</h1>
             <p class="mu">Create an account or sign in with your email and password. Email confirmation may be required.</p>
@@ -538,11 +546,30 @@ function account() {
 
     const favoriteGames = (db.favs[currentUser] || []).filter((gameId) => db.games.some((game) => game.id == gameId));
     const savedGameKeys = Object.keys(db.saves).filter((key) => key.startsWith(currentUser + '|'));
+    let profileNotice = '';
+
+    try {
+        const result = await authenticatedApiRequest('/api/profile');
+        if (currentRoute.v !== 'account' || db.user !== currentUser) return;
+        if (typeof result.username !== 'string') throw new Error('The API returned an invalid username profile.');
+        publicUsername = result.username;
+        renderNavigation();
+    } catch (error) {
+        if (currentRoute.v !== 'account' || db.user !== currentUser) return;
+        profileNotice = `<p class="mu">Could not load your username: ${escapeHtml(error.message)}</p>`;
+    }
 
     $('#app').innerHTML = `
-        <h1>${escapeHtml(currentUser)}</h1>
+        <h1>Account</h1>
         <p class="mu">Signed in with Supabase. Published games and player data are not yet saved to the server.</p>
         <div class="bar"><button class="b" data-a="signOut">Sign out</button></div>
+        <h2>Public username</h2>
+        <p class="mu">This name appears as the author of your games. Your account ID stays private.</p>
+        ${profileNotice}
+        <div class="auth-form">
+            <label>Username <input id="public-username" type="text" value="${escapeHtml(publicUsername)}" minlength="3" maxlength="24" autocomplete="username"></label>
+        </div>
+        <button class="b p" data-a="saveUsername">Save username</button>
         <h2>Favorites</h2>
         ${favoriteGames.length ? favoriteGames.map((gameId) => `<div class="row2"><a href="#play-${gameId}">${escapeHtml(titleForGame(gameId))}</a></div>`).join('') : '<p class="mu">Nothing yet.</p>'}
         <h2>Saved data</h2>
@@ -594,6 +621,7 @@ const actionHandlers = {
     },
     async sub() {
         if (!db.user) return toast('Sign in on the Account page to submit.');
+        if (!publicUsername) return toast('Choose and save a public username on the Account page before submitting.');
         if (!draft.title.trim()) return toast('Add a title.');
         if (!draft.js.trim() && !draft.html.trim()) return toast('Nothing to submit yet.');
         if (draft.id) return toast('Submitting new versions is not connected yet. Start from a new game template.');
@@ -765,8 +793,31 @@ const actionHandlers = {
         const { error } = await authClient.auth.signOut();
         if (error) return toast(error.message);
         db.user = '';
+        publicUsername = '';
         saveData();
         render();
+    },
+    async saveUsername() {
+        const input = $('#public-username');
+        const username = input.value.trim();
+        if (!/^[A-Za-z0-9_]{3,24}$/.test(username)) {
+            return toast('Use 3–24 letters, numbers, or underscores.');
+        }
+
+        try {
+            const result = await authenticatedApiRequest('/api/profile', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username })
+            });
+            if (typeof result.username !== 'string') throw new Error('The API returned an invalid username profile.');
+            publicUsername = result.username;
+            renderNavigation();
+            toast('Username saved.');
+            await account();
+        } catch (error) {
+            toast(`Could not save username: ${error.message}`);
+        }
     },
     clr(key) {
         delete db.saves[key];
@@ -867,6 +918,7 @@ if (
     authClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
     authClient.auth.onAuthStateChange((_event, session) => {
         db.user = session?.user.email || '';
+        publicUsername = '';
         saveData();
         render();
     });
@@ -876,6 +928,7 @@ if (
             return;
         }
         db.user = data.session?.user.email || '';
+        publicUsername = '';
         saveData();
         render();
     });
