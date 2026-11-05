@@ -910,11 +910,7 @@ addEventListener('message', (event) => {
 addEventListener('hashchange', go);
 go();
 
-if (
-    window.supabase &&
-    SUPABASE_URL !== 'https://gahjnjpockmwhozouyew.supabase.co' &&
-    SUPABASE_PUBLISHABLE_KEY !== 'sb_publishable_hGku3vvs1IlHqswTc3MvBg_gAkF-vOR'
-) {
+if (window.supabase && SUPABASE_URL && SUPABASE_PUBLISHABLE_KEY) {
     authClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
     authClient.auth.onAuthStateChange((_event, session) => {
         db.user = session?.user.email || '';
@@ -932,6 +928,8 @@ if (
         saveData();
         render();
     });
-} else if (SUPABASE_URL !== 'PASTE_YOUR_SUPABASE_PROJECT_URL_HERE') {
+} else if (!window.supabase) {
     toast('Supabase client library did not load. Check your internet connection and reload.');
+} else {
+    toast('Supabase is not configured. Add your project URL and publishable key in script.js.');
 }
