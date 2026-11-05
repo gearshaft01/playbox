@@ -20,6 +20,8 @@ let currentRoute = { v: 'browse' };
 let authClient = null;
 let pendingRemoteGames = [];
 let publicUsername = '';
+let studioProjects = [];
+let selectedStudioProjectId = '';
 
 const toast = (message) => {
     const toastNode = $('#t');
@@ -211,7 +213,9 @@ const renderNavigation = () => {
 
 function go() {
     const hash = location.hash.slice(1) || 'browse';
-    if (hash.startsWith('play-api-')) {
+    if (hash.startsWith('play-private-')) {
+        currentRoute = { v: 'play', id: decodeURIComponent(hash.slice(13)), ownerOnly: true };
+    } else if (hash.startsWith('play-api-')) {
         currentRoute = { v: 'play', id: decodeURIComponent(hash.slice(9)), remote: true };
     } else {
         currentRoute = hash.startsWith('play-')
@@ -279,18 +283,28 @@ async function play() {
     let game = db.games.find((entry) => entry.id == currentRoute.id);
     let version = game && getPublicVersion(game);
 
-    if (currentRoute.remote) {
+    if (currentRoute.remote || currentRoute.ownerOnly) {
         const requestedGameId = currentRoute.id;
         $('#app').innerHTML = '<p class="mu">Loading game…</p>';
         try {
-            const response = await fetch(`${API_BASE_URL}/api/games/${encodeURIComponent(requestedGameId)}`);
+            const response = currentRoute.ownerOnly
+                ? await (async () => {
+                    if (!authClient) throw new Error('Sign in to play your private project.');
+                    const { data, error } = await authClient.auth.getSession();
+                    if (error) throw error;
+                    if (!data.session) throw new Error('Sign in to play your private project.');
+                    return fetch(`${API_BASE_URL}/api/my/games/${encodeURIComponent(requestedGameId)}/play`, {
+                        headers: { Authorization: `Bearer ${data.session.access_token}` }
+                    });
+                })()
+                : await fetch(`${API_BASE_URL}/api/games/${encodeURIComponent(requestedGameId)}`);
             if (!response.ok) {
                 if (response.status === 404) throw new Error('Game not found or not published.');
                 throw new Error(`API request failed (${response.status})`);
             }
             const result = await response.json();
             if (!result.game) throw new Error('API returned an invalid game response');
-            if (currentRoute.v !== 'play' || !currentRoute.remote || currentRoute.id !== requestedGameId) return;
+            if (currentRoute.v !== 'play' || currentRoute.id !== requestedGameId) return;
             const remoteVersion = result.game;
             game = { id: remoteVersion.id, author: remoteVersion.author };
             version = {
@@ -303,7 +317,7 @@ async function play() {
                 js: remoteVersion.js
             };
         } catch (error) {
-            if (currentRoute.v !== 'play' || !currentRoute.remote || currentRoute.id !== requestedGameId) return;
+            if (currentRoute.v !== 'play' || currentRoute.id !== requestedGameId) return;
             $('#app').innerHTML = `<h1>Unable to load game</h1><p class="mu">${escapeHtml(error.message)}</p><a href="#browse">Back to browse</a>`;
             return;
         }
@@ -360,13 +374,79 @@ const fillStudioInputs = () => {
     runPreview();
 };
 
+const renderStudioProjects = () => {
+    const select = $('#project-select');
+    const actions = $('#project-actions');
+    if (!select || !actions) return;
+
+    select.innerHTML = '<option value="">Select a project…</option>' + studioProjects.map((project) => {
+        const visibility = project.visibility === 'private' ? 'Private' : 'Public';
+        return `<option value="${escapeHtml(project.id)}">${escapeHtml(project.title)} — v${project.version_number} · ${escapeHtml(project.status)} · ${visibility}</option>`;
+    }).join('');
+    select.value = studioProjects.some((project) => project.id === selectedStudioProjectId)
+        ? selectedStudioProjectId
+        : '';
+    actions.hidden = !select.value;
+
+    const selectedProject = studioProjects.find((project) => project.id === select.value);
+    const visibilityButton = $('#toggle-visibility');
+    if (visibilityButton && selectedProject) {
+        visibilityButton.textContent = selectedProject.visibility === 'private'
+            ? 'Make public'
+            : 'Archive (make private)';
+    }
+
+    const status = $('#project-status');
+    if (status) {
+        status.textContent = studioProjects.length
+            ? `${studioProjects.length} project${studioProjects.length === 1 ? '' : 's'} saved to your account.`
+            : 'No server projects yet. Create a game below and submit it for review.';
+    }
+};
+
+async function loadStudioProjects() {
+    const status = $('#project-status');
+    if (!db.user) {
+        studioProjects = [];
+        renderStudioProjects();
+        if (status) status.textContent = 'Sign in to manage projects across devices.';
+        return;
+    }
+
+    if (status) status.textContent = 'Loading your projects…';
+    try {
+        const result = await authenticatedApiRequest('/api/my/games');
+        if (currentRoute.v !== 'studio') return;
+        if (!Array.isArray(result.games)) throw new Error('The API returned an invalid project list.');
+        studioProjects = result.games;
+        renderStudioProjects();
+    } catch (error) {
+        if (currentRoute.v !== 'studio') return;
+        studioProjects = [];
+        renderStudioProjects();
+        if (status) status.textContent = `Could not load projects: ${error.message}`;
+    }
+}
+
 function studio() {
     activeTab = 'html';
-    const ownedGames = db.games.filter((game) => game.author == db.user);
+    selectedStudioProjectId = draft.id || '';
 
     $('#app').innerHTML = `
         <h1>Studio</h1>
         <p class="mu">A game is one file: HTML, CSS and JavaScript. Write it here or upload your own files and Studio bundles them. Use data: URLs for images and audio, and no external links.</p>
+        <h2>My projects</h2>
+        <p id="project-status" class="mu">Loading your projects…</p>
+        <div class="bar">
+            <select id="project-select" aria-label="Select a project">
+                <option value="">Select a project…</option>
+            </select>
+            <button class="b" data-a="editProject">Open selected</button>
+            <button class="b" data-a="playProject">Play</button>
+            <button class="b" id="toggle-visibility" data-a="toggleVisibility">Archive (make private)</button>
+            <button class="b" data-a="deleteProject">Delete permanently</button>
+            <button class="b" data-a="newProject">New project</button>
+        </div>
         <div class="studio">
             <div>
                 <input id="ti" placeholder="Game title" aria-label="Game title">
@@ -387,19 +467,8 @@ function studio() {
         <h2>Submit for review</h2>
         <input id="ds" placeholder="Short description" aria-label="Description">
         <div class="bar"><label class="mu">Thumbnail color <input id="co" type="color"></label></div>
-        <button class="b p" data-a="sub">Submit for review</button> <span class="mu sm">${db.user ? 'Signed in as ' + escapeHtml(publicUsername || 'Player') + '.' : 'Sign in on the Account page to submit.'}</span>
-        <h2>My games</h2>
-        ${ownedGames.length ? ownedGames.map((game) => `
-            <div class="row2">
-                <div>
-                    <b>${escapeHtml(game.versions[game.versions.length - 1].title)}</b>
-                    <div>
-                        ${game.versions.map((version) => `<span class="chip ${version.status == 'approved' ? 'ok' : version.status == 'rejected' ? 'bad' : 'wn'}" title="${escapeHtml(version.reason)}">v${version.n} ${version.status}${version.reason ? ': ' + escapeHtml(version.reason) : ''}</span>`).join('')}
-                    </div>
-                </div>
-                <button class="b" data-a="edit" data-v="${game.id}">Edit as new version</button>
-            </div>
-        `).join('') : '<p class="mu">Games you submit will show up here with their review status.</p>'}
+        <button class="b p" data-a="sub">Submit for review</button>
+        <span class="mu sm">${db.user ? 'Signed in as ' + escapeHtml(publicUsername || 'Player') + '.' : 'Sign in on the Account page to submit.'}</span>
     `;
 
     $('#ed').oninput = (event) => {
@@ -422,8 +491,14 @@ function studio() {
         await ingest(event.target.files);
         event.target.value = '';
     };
+    $('#project-select').onchange = (event) => {
+        selectedStudioProjectId = event.target.value;
+        renderStudioProjects();
+    };
 
     fillStudioInputs();
+    renderStudioProjects();
+    loadStudioProjects();
 }
 
 async function ingest(files) {
@@ -624,22 +699,19 @@ const actionHandlers = {
         if (!publicUsername) return toast('Choose and save a public username on the Account page before submitting.');
         if (!draft.title.trim()) return toast('Add a title.');
         if (!draft.js.trim() && !draft.html.trim()) return toast('Nothing to submit yet.');
-        if (draft.id) return toast('Submitting new versions is not connected yet. Start from a new game template.');
         if (new TextEncoder().encode(draft.html + draft.css + draft.js).length > 1_800_000) {
             return toast('This game is too large for D1 storage. The limit is about 1.8 MB.');
         }
-        if (!authClient) return toast('Supabase is not configured.');
 
         try {
-            const { data, error: sessionError } = await authClient.auth.getSession();
-            if (sessionError) throw sessionError;
-            if (!data.session) return toast('Sign in again before submitting.');
-
-            const response = await fetch(`${API_BASE_URL}/api/games`, {
+            const isNewProject = !draft.id;
+            const path = isNewProject
+                ? '/api/games'
+                : `/api/my/games/${encodeURIComponent(draft.id)}/versions`;
+            const result = await authenticatedApiRequest(path, {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${data.session.access_token}`
+                    'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
                     title: draft.title.trim(),
@@ -650,49 +722,87 @@ const actionHandlers = {
                     js: draft.js
                 })
             });
-            const result = await response.json();
-            if (!response.ok) throw new Error(result.error || `Submission failed (${response.status})`);
-            if (typeof result.id !== 'string' || result.status !== 'pending') {
-                throw new Error('The server returned an invalid submission response.');
+            if (isNewProject) {
+                if (typeof result.id !== 'string' || result.status !== 'pending') {
+                    throw new Error('The server returned an invalid submission response.');
+                }
+                draft.id = result.id;
+            } else if (result.status !== 'pending') {
+                throw new Error('The server returned an invalid version response.');
             }
 
-            const submittedGame = {
-                id: result.id,
-                author: db.user,
-                versions: [{
-                    n: 1,
-                    status: 'pending',
-                    reason: '',
-                    title: draft.title.trim(),
-                    desc: draft.desc,
-                    color: getColor(draft.color),
-                    html: draft.html,
-                    css: draft.css,
-                    js: draft.js
-                }]
-            };
-            db.games.push(submittedGame);
-            draft.id = result.id;
+            selectedStudioProjectId = draft.id;
             saveData();
-            toast('Submitted to the server for review.');
-            studio();
+            toast(`Version ${result.version_number || 1} submitted for review.`);
+            await loadStudioProjects();
         } catch (error) {
             toast(`Could not submit game: ${error.message}`);
         }
     },
-    edit(gameId) {
-        const game = db.games.find((entry) => entry.id == gameId);
-        const latestVersion = game.versions[game.versions.length - 1];
+    async editProject() {
+        const projectId = $('#project-select').value;
+        const project = studioProjects.find((entry) => entry.id === projectId);
+        if (!project) return toast('Select a project first.');
         draft = {
-            id: game.id,
-            title: latestVersion.title,
-            desc: latestVersion.desc,
-            color: latestVersion.color,
-            html: latestVersion.html,
-            css: latestVersion.css,
-            js: latestVersion.js
+            id: project.id,
+            title: project.title,
+            desc: project.description,
+            color: project.color,
+            html: project.html,
+            css: project.css,
+            js: project.js
         };
-        studio();
+        selectedStudioProjectId = project.id;
+        fillStudioInputs();
+        toast(`Editing ${project.title}. Submitting changes creates a new review version.`);
+    },
+    newProject() {
+        draft = { ...starterTemplate };
+        selectedStudioProjectId = '';
+        activeTab = 'html';
+        fillStudioInputs();
+        renderStudioProjects();
+    },
+    playProject() {
+        const projectId = $('#project-select').value;
+        if (!projectId) return toast('Select a project first.');
+        location.hash = `#play-private-${encodeURIComponent(projectId)}`;
+    },
+    async toggleVisibility() {
+        const projectId = $('#project-select').value;
+        const project = studioProjects.find((entry) => entry.id === projectId);
+        if (!project) return toast('Select a project first.');
+        const visibility = project.visibility === 'private' ? 'public' : 'private';
+        try {
+            await authenticatedApiRequest(`/api/my/games/${encodeURIComponent(projectId)}/visibility`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ visibility })
+            });
+            toast(visibility === 'private' ? 'Project archived and made private.' : 'Project made public.');
+            await loadStudioProjects();
+        } catch (error) {
+            toast(`Could not update project visibility: ${error.message}`);
+        }
+    },
+    async deleteProject() {
+        const projectId = $('#project-select').value;
+        const project = studioProjects.find((entry) => entry.id === projectId);
+        if (!project) return toast('Select a project first.');
+        if (!confirm(`Permanently delete "${project.title}" and all its versions, saves, favorites, and scores? This cannot be undone.`)) return;
+        try {
+            await authenticatedApiRequest(`/api/my/games/${encodeURIComponent(projectId)}`, {
+                method: 'DELETE'
+            });
+            studioProjects = studioProjects.filter((entry) => entry.id !== projectId);
+            selectedStudioProjectId = '';
+            if (draft.id === projectId) draft = { ...starterTemplate };
+            fillStudioInputs();
+            renderStudioProjects();
+            toast('Project permanently deleted.');
+        } catch (error) {
+            toast(`Could not delete project: ${error.message}`);
+        }
     },
     rvp(value) {
         const [gameId, versionNumber] = value.split('.');
