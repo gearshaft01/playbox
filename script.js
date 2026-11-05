@@ -437,7 +437,7 @@ function studio() {
         <p class="mu">A game is one file: HTML, CSS and JavaScript. Write it here or upload your own files and Studio bundles them. Use data: URLs for images and audio, and no external links.</p>
         <h2>My projects</h2>
         <p id="project-status" class="mu">Loading your projects…</p>
-        <div class="bar">
+        <div class="bar" id="project-actions">
             <select id="project-select" aria-label="Select a project">
                 <option value="">Select a project…</option>
             </select>
