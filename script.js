@@ -375,20 +375,26 @@ const fillStudioInputs = () => {
 };
 
 const renderStudioProjects = () => {
-    const select = $('#project-select');
+    const list = $('#project-list');
     const actions = $('#project-actions');
-    if (!select || !actions) return;
+    if (!list || !actions) return;
 
-    select.innerHTML = '<option value="">Select a project…</option>' + studioProjects.map((project) => {
-        const visibility = project.visibility === 'private' ? 'Private' : 'Public';
-        return `<option value="${escapeHtml(project.id)}">${escapeHtml(project.title)} — v${project.version_number} · ${escapeHtml(project.status)} · ${visibility}</option>`;
-    }).join('');
-    select.value = studioProjects.some((project) => project.id === selectedStudioProjectId)
-        ? selectedStudioProjectId
-        : '';
-    actions.hidden = !select.value;
+    if (!studioProjects.some((project) => project.id === selectedStudioProjectId)) {
+        selectedStudioProjectId = '';
+    }
+    list.innerHTML = studioProjects.length
+        ? studioProjects.map((project) => {
+            const visibility = project.visibility === 'private' ? 'Private' : 'Public';
+            const selected = project.id === selectedStudioProjectId;
+            return `<button type="button" class="studio-project${selected ? ' selected' : ''}" data-a="selectProject" data-v="${escapeHtml(project.id)}" aria-pressed="${selected}">
+                <span class="studio-project-title">${escapeHtml(project.title)}</span>
+                <span class="studio-project-meta">v${escapeHtml(project.version_number)} · ${escapeHtml(project.status)} · ${visibility}</span>
+            </button>`;
+        }).join('')
+        : '<p class="mu studio-empty">No projects yet. Create a game to get started.</p>';
+    actions.hidden = !selectedStudioProjectId;
 
-    const selectedProject = studioProjects.find((project) => project.id === select.value);
+    const selectedProject = studioProjects.find((project) => project.id === selectedStudioProjectId);
     const visibilityButton = $('#toggle-visibility');
     if (visibilityButton && selectedProject) {
         visibilityButton.textContent = selectedProject.visibility === 'private'
@@ -435,40 +441,46 @@ function studio() {
     $('#app').innerHTML = `
         <h1>Studio</h1>
         <p class="mu">A game is one file: HTML, CSS and JavaScript. Write it here or upload your own files and Studio bundles them. Use data: URLs for images and audio, and no external links.</p>
-        <h2>My projects</h2>
-        <p id="project-status" class="mu">Loading your projects…</p>
-        <div class="bar" id="project-actions">
-            <select id="project-select" aria-label="Select a project">
-                <option value="">Select a project…</option>
-            </select>
-            <button class="b" data-a="editProject">Open selected</button>
-            <button class="b" data-a="playProject">Play</button>
-            <button class="b" id="toggle-visibility" data-a="toggleVisibility">Archive (make private)</button>
-            <button class="b" data-a="deleteProject">Delete permanently</button>
-            <button class="b" data-a="newProject">New project</button>
-        </div>
-        <div class="studio">
-            <div>
-                <input id="ti" placeholder="Game title" aria-label="Game title">
-                <div class="bar">${['html', 'css', 'js'].map((tabName) => `<button class="b${tabName == 'html' ? ' on' : ''}" data-a="tab" data-v="${tabName}">${tabName.toUpperCase()}</button>`).join('')}</div>
-                <textarea id="ed" class="ed" spellcheck="false" aria-label="Code editor"></textarea>
-                <div class="bar">
-                    <button class="b" data-a="upl">Upload files</button>
-                    <button class="b" data-a="tpl">Starter template</button>
+        <div class="studio-shell">
+            <aside class="studio-sidebar" aria-label="Your projects">
+                <div class="studio-sidebar-heading">
+                    <h2>My projects</h2>
+                    <button class="b" data-a="newProject">New</button>
                 </div>
-                <input id="up" type="file" multiple accept=".html,.htm,.css,.js" hidden>
-            </div>
-            <div>
-                <div class="frame"><iframe id="pv" title="Live preview" sandbox="allow-scripts allow-pointer-lock"></iframe></div>
-                <pre class="log" id="log">SDK calls from your game show up here.</pre>
-                <div id="fl"></div>
+                <p id="project-status" class="mu studio-status">Loading your projects…</p>
+                <div id="project-list" class="studio-project-list"></div>
+                <div class="studio-project-actions" id="project-actions" hidden>
+                    <button class="b p" data-a="editProject">Open selected</button>
+                    <button class="b" data-a="playProject">Play</button>
+                    <button class="b" id="toggle-visibility" data-a="toggleVisibility">Archive (make private)</button>
+                    <button class="b" data-a="deleteProject">Delete permanently</button>
+                </div>
+            </aside>
+            <div class="studio-main">
+                <div class="studio">
+                    <div>
+                        <input id="ti" placeholder="Game title" aria-label="Game title">
+                        <div class="bar">${['html', 'css', 'js'].map((tabName) => `<button class="b${tabName == 'html' ? ' on' : ''}" data-a="tab" data-v="${tabName}">${tabName.toUpperCase()}</button>`).join('')}</div>
+                        <textarea id="ed" class="ed" spellcheck="false" aria-label="Code editor"></textarea>
+                        <div class="bar">
+                            <button class="b" data-a="upl">Upload files</button>
+                            <button class="b" data-a="tpl">Starter template</button>
+                        </div>
+                        <input id="up" type="file" multiple accept=".html,.htm,.css,.js" hidden>
+                    </div>
+                    <div>
+                        <div class="frame"><iframe id="pv" title="Live preview" sandbox="allow-scripts allow-pointer-lock"></iframe></div>
+                        <pre class="log" id="log">SDK calls from your game show up here.</pre>
+                        <div id="fl"></div>
+                    </div>
+                </div>
+                <h2>Submit for review</h2>
+                <input id="ds" placeholder="Short description" aria-label="Description">
+                <div class="bar"><label class="mu">Thumbnail color <input id="co" type="color"></label></div>
+                <button class="b p" data-a="sub">Submit for review</button>
+                <span class="mu sm">${db.user ? 'Signed in as ' + escapeHtml(publicUsername || 'Player') + '.' : 'Sign in on the Account page to submit.'}</span>
             </div>
         </div>
-        <h2>Submit for review</h2>
-        <input id="ds" placeholder="Short description" aria-label="Description">
-        <div class="bar"><label class="mu">Thumbnail color <input id="co" type="color"></label></div>
-        <button class="b p" data-a="sub">Submit for review</button>
-        <span class="mu sm">${db.user ? 'Signed in as ' + escapeHtml(publicUsername || 'Player') + '.' : 'Sign in on the Account page to submit.'}</span>
     `;
 
     $('#ed').oninput = (event) => {
@@ -491,11 +503,6 @@ function studio() {
         await ingest(event.target.files);
         event.target.value = '';
     };
-    $('#project-select').onchange = (event) => {
-        selectedStudioProjectId = event.target.value;
-        renderStudioProjects();
-    };
-
     fillStudioInputs();
     renderStudioProjects();
     loadStudioProjects();
@@ -740,7 +747,7 @@ const actionHandlers = {
         }
     },
     async editProject() {
-        const projectId = $('#project-select').value;
+        const projectId = selectedStudioProjectId;
         const project = studioProjects.find((entry) => entry.id === projectId);
         if (!project) return toast('Select a project first.');
         draft = {
@@ -756,6 +763,10 @@ const actionHandlers = {
         fillStudioInputs();
         toast(`Editing ${project.title}. Submitting changes creates a new review version.`);
     },
+    selectProject(projectId) {
+        selectedStudioProjectId = projectId;
+        renderStudioProjects();
+    },
     newProject() {
         draft = { ...starterTemplate };
         selectedStudioProjectId = '';
@@ -764,12 +775,12 @@ const actionHandlers = {
         renderStudioProjects();
     },
     playProject() {
-        const projectId = $('#project-select').value;
+        const projectId = selectedStudioProjectId;
         if (!projectId) return toast('Select a project first.');
         location.hash = `#play-private-${encodeURIComponent(projectId)}`;
     },
     async toggleVisibility() {
-        const projectId = $('#project-select').value;
+        const projectId = selectedStudioProjectId;
         const project = studioProjects.find((entry) => entry.id === projectId);
         if (!project) return toast('Select a project first.');
         const visibility = project.visibility === 'private' ? 'public' : 'private';
@@ -786,7 +797,7 @@ const actionHandlers = {
         }
     },
     async deleteProject() {
-        const projectId = $('#project-select').value;
+        const projectId = selectedStudioProjectId;
         const project = studioProjects.find((entry) => entry.id === projectId);
         if (!project) return toast('Select a project first.');
         if (!confirm(`Permanently delete "${project.title}" and all its versions, saves, favorites, and scores? This cannot be undone.`)) return;
