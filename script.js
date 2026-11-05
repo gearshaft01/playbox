@@ -912,8 +912,8 @@ go();
 
 if (
     window.supabase &&
-    SUPABASE_URL !== 'PASTE_YOUR_SUPABASE_PROJECT_URL_HERE' &&
-    SUPABASE_PUBLISHABLE_KEY !== 'PASTE_YOUR_SUPABASE_PUBLISHABLE_KEY_HERE'
+    SUPABASE_URL !== 'https://gahjnjpockmwhozouyew.supabase.co' &&
+    SUPABASE_PUBLISHABLE_KEY !== 'sb_publishable_hGku3vvs1IlHqswTc3MvBg_gAkF-vOR'
 ) {
     authClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
     authClient.auth.onAuthStateChange((_event, session) => {
