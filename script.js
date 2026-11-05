@@ -22,6 +22,11 @@ let pendingRemoteGames = [];
 let publicUsername = '';
 let studioProjects = [];
 let selectedStudioProjectId = '';
+let moderatorAccess = false;
+let moderatorAccessError = '';
+let moderatorCheckPromise = null;
+let moderatorCheckId = 0;
+let moderatorUserId = '';
 
 const toast = (message) => {
     const toastNode = $('#t');
@@ -204,8 +209,58 @@ const board = (gameId) => {
         : '<p class="mu">No scores yet. Be the first.</p>';
 };
 
+const resetModeratorAccess = () => {
+    moderatorAccess = false;
+    moderatorAccessError = '';
+    moderatorCheckPromise = null;
+    moderatorCheckId += 1;
+    moderatorUserId = '';
+    pendingRemoteGames = [];
+};
+
+const checkModeratorAccess = async (refresh = false) => {
+    if (!authClient || !db.user) {
+        moderatorAccess = false;
+        moderatorAccessError = 'Sign in with a moderator account to access the review queue.';
+        return false;
+    }
+    if (moderatorAccess && !refresh) return true;
+    if (moderatorCheckPromise) return moderatorCheckPromise;
+    if (refresh && moderatorAccess) {
+        moderatorAccess = false;
+        renderNavigation();
+    }
+
+    const checkId = ++moderatorCheckId;
+    const promise = (async () => {
+        try {
+            const result = await authenticatedApiRequest('/api/moderation/pending');
+            if (checkId !== moderatorCheckId) return false;
+            if (!Array.isArray(result.games)) throw new Error('The API returned an invalid review queue.');
+            moderatorAccess = true;
+            moderatorAccessError = '';
+            pendingRemoteGames = result.games;
+            return true;
+        } catch (error) {
+            if (checkId === moderatorCheckId) {
+                moderatorAccess = false;
+                moderatorAccessError = error.message;
+                pendingRemoteGames = [];
+            }
+            return false;
+        } finally {
+            if (checkId === moderatorCheckId) {
+                moderatorCheckPromise = null;
+                renderNavigation();
+            }
+        }
+    })();
+    moderatorCheckPromise = promise;
+    return promise;
+};
+
 const renderNavigation = () => {
-    $('#nav').innerHTML = [['browse', 'Browse'], ['studio', 'Studio'], ['docs', 'Game API'], ...((db.mod || db.user) ? [['review', 'Review']] : []), ['account', 'Account']]
+    $('#nav').innerHTML = [['browse', 'Browse'], ['studio', 'Studio'], ['docs', 'Game API'], ...(moderatorAccess ? [['review', 'Review']] : []), ['account', 'Account']]
         .map(([routeKey, label]) => `<a class="b${currentRoute.v == routeKey ? ' on' : ''}" href="#${routeKey}">${label}</a>`)
         .join('');
     $('#me').textContent = publicUsername || (db.user ? 'Signed in' : 'Guest');
@@ -642,13 +697,15 @@ async function ingest(files) {
 async function review() {
     $('#app').innerHTML = '<h1>Review queue</h1><p class="mu">Checking moderator access…</p>';
 
-    try {
-        const result = await authenticatedApiRequest('/api/moderation/pending');
+    if (!await checkModeratorAccess(true)) {
         if (currentRoute.v !== 'review') return;
-        if (!Array.isArray(result.games)) throw new Error('The API returned an invalid review queue.');
+        $('#app').innerHTML = `<h1>Review unavailable</h1><p class="mu">${escapeHtml(moderatorAccessError || 'Moderator access required.')}</p>`;
+        return;
+    }
+    if (currentRoute.v !== 'review') return;
 
-        const pending = result.games;
-        pendingRemoteGames = pending;
+    try {
+        const pending = pendingRemoteGames;
         $('#app').innerHTML = '<h1>Review queue</h1><div id="rvw"></div>' +
             (pending.length ? pending.map((game) => {
                 const version = {
@@ -1101,21 +1158,23 @@ go();
 
 if (window.supabase && SUPABASE_URL && SUPABASE_PUBLISHABLE_KEY) {
     authClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
-    authClient.auth.onAuthStateChange((_event, session) => {
+    const syncAuthSession = (session) => {
+        const userId = session?.user.id || '';
+        if (userId !== moderatorUserId) resetModeratorAccess();
+        moderatorUserId = userId;
         db.user = session?.user.email || '';
         publicUsername = '';
         saveData();
         render();
-    });
+        if (userId) checkModeratorAccess();
+    };
+    authClient.auth.onAuthStateChange((_event, session) => syncAuthSession(session));
     authClient.auth.getSession().then(({ data, error }) => {
         if (error) {
             toast(`Could not restore sign-in: ${error.message}`);
             return;
         }
-        db.user = data.session?.user.email || '';
-        publicUsername = '';
-        saveData();
-        render();
+        syncAuthSession(data.session);
     });
 } else if (!window.supabase) {
     toast('Supabase client library did not load. Check your internet connection and reload.');
