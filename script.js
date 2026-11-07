@@ -57,6 +57,7 @@ const refreshCardPreview = () => {
 
 let memory = null;
 let toastHandle;
+let storageWarningShown = false;
 let activeTab = 'html';
 let currentRoute = { v: 'browse' };
 let authClient = null;
@@ -64,6 +65,10 @@ let pendingRemoteGames = [];
 let publicUsername = '';
 let studioProjects = [];
 let selectedStudioProjectId = '';
+let studioWorkspaceOpen = false;
+let studioFolders = new Set();
+let studioTreeInitialized = false;
+let activeProjectFilePath = '';
 let moderatorAccess = false;
 let moderatorAccessError = '';
 let moderatorCheckPromise = null;
@@ -188,8 +193,12 @@ const saveData = () => {
     memory = db;
     try {
         localStorage.setItem(KEY, JSON.stringify({ ...db, user: '' }));
-    } catch (error) {
-        // Ignore storage errors in the prototype app.
+        storageWarningShown = false;
+    } catch {
+        if (!storageWarningShown) {
+            toast('Your changes could not be saved in this browser. Free up storage space and try again.');
+            storageWarningShown = true;
+        }
     }
 };
 
@@ -457,7 +466,8 @@ async function play() {
 }
 
 const runPreview = () => {
-    const source = buildGameDocument(draft, draft.title);
+    const game = compileStudioProject(draft);
+    const source = buildGameDocument(game, draft.title);
     const warnings = scanCode(source);
     $('#pv').srcdoc = wrapDocument(source);
     $('#fl').innerHTML = (warnings.length
@@ -478,12 +488,213 @@ const triggerPreview = () => {
 
 const fillStudioInputs = () => {
     $('#ti').value = draft.title;
+    const workspaceTitle = $('#workspace-title');
+    if (workspaceTitle) workspaceTitle.textContent = draft.title || 'Untitled game';
     $('#ds').value = draft.desc;
     $('#co').value = getColor(draft.color);
     $('#ab').value = draft.about || '';
     $('#tg').value = draft.tags || '';
     $('#ed').value = draft[activeTab];
     runPreview();
+};
+
+const studioFileNames = { html: 'index.html', css: 'style.css', js: 'script.js' };
+
+const normalizeProjectPath = (path) => String(path || '').replace(/\\/g, '/').split('/')
+    .map((part) => part.trim())
+    .filter((part) => part && part !== '.')
+    .filter((part) => part !== '..')
+    .join('/');
+
+const projectFileType = (path) => path.split('.').pop().toLowerCase();
+
+const compileStudioProject = (project) => {
+    const files = Array.isArray(project.files) ? project.files : [];
+    const findFile = (reference) => {
+        const path = normalizeProjectPath(reference);
+        const exact = files.find((entry) => normalizeProjectPath(entry.path) === path);
+        if (exact) return exact;
+        const name = path.split('/').pop();
+        const matches = files.filter((entry) => entry.path.split('/').pop() === name);
+        return matches.length === 1 ? matches[0] : null;
+    };
+    let html = project.html;
+    let css = project.css;
+    let js = project.js;
+    const assets = files.filter((file) => file.dataUrl || projectFileType(file.path) === 'svg');
+    const projectText = Object.fromEntries(files
+        .filter((file) => !file.dataUrl && !['js', 'css', 'svg'].includes(projectFileType(file.path)))
+        .map((file) => [file.path, file.content || '']));
+
+    for (const file of files) {
+        const type = projectFileType(file.path);
+        if (type === 'css') css += `\n\n${file.content || ''}`;
+        if (type === 'js') js += `\n;\n${file.content || ''}`;
+    }
+    if (Object.keys(projectText).length) {
+        js = `window.Playbox.files = ${JSON.stringify(projectText)};\n${js}`;
+    }
+
+    html = html.replace(/<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>\s*<\/script\s*>/gi, (tag, src) => {
+        const file = findFile(src);
+        const coreScript = ['script.js', 'src/script.js'].includes(normalizeProjectPath(src));
+        return (file && projectFileType(file.path) === 'js') || coreScript ? '' : tag;
+    });
+    html = html.replace(/<link\b(?=[^>]*\brel=["']?stylesheet["']?)[^>]*\bhref=["']([^"']+)["'][^>]*>/gi, (tag, href) => {
+        const file = findFile(href);
+        const coreStyle = ['style.css', 'src/style.css'].includes(normalizeProjectPath(href));
+        return (file && projectFileType(file.path) === 'css') || coreStyle ? '' : tag;
+    });
+
+    for (const asset of assets) {
+        const encoded = asset.dataUrl || `data:image/svg+xml;charset=utf-8,${encodeURIComponent(asset.content || '')}`;
+        const paths = [normalizeProjectPath(asset.path), asset.path.split('/').pop()];
+        for (const path of new Set(paths)) {
+            const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const reference = new RegExp(`(?<![A-Za-z0-9_])(?:\\.\\/)?${escapedPath.replace(/\//g, '\\/')}(?![A-Za-z0-9_.-])`, 'g');
+            html = html.replace(reference, encoded);
+            css = css.replace(reference, encoded);
+            js = js.replace(reference, encoded);
+        }
+    }
+
+    return { ...project, html, css, js };
+};
+
+const projectTextExtensions = new Set(['js', 'css', 'json', 'txt', 'svg', 'md', 'xml', 'csv', 'html', 'htm']);
+
+const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}.`));
+    reader.readAsDataURL(file);
+});
+
+const renderActiveStudioFile = () => {
+    const file = activeProjectFilePath && draft.files.find((entry) => entry.path === activeProjectFilePath);
+    const editor = $('#ed');
+    const preview = $('#asset-preview');
+    const deleteButton = $('[data-a="deleteProjectFile"]');
+    if (!editor) return;
+    $('#editor-file-name').textContent = file ? file.path : studioFileNames[activeTab];
+    deleteButton.hidden = !file;
+    preview.hidden = !(file && file.dataUrl);
+    if (file && file.dataUrl) {
+        editor.hidden = true;
+        preview.innerHTML = `<p>${escapeHtml(file.path)} is a binary asset. Its references are embedded when publishing.</p>${file.dataUrl.startsWith('data:image/') ? `<img src="${file.dataUrl}" alt="${escapeHtml(file.path)}">` : ''}`;
+    } else {
+        editor.hidden = false;
+        preview.innerHTML = '';
+        editor.value = file ? file.content : draft[activeTab];
+        editor.setAttribute('aria-label', file ? `Editor for ${file.path}` : 'Code editor');
+    }
+    renderStudioFileTree();
+};
+
+const renderStudioFileTree = () => {
+    const tree = $('#file-tree');
+    if (!tree) return;
+    if (!Array.isArray(draft.files)) draft.files = [];
+    const files = [
+        ...Object.entries(studioFileNames).map(([type, name]) => ({ path: `src/${name}`, type, core: true })),
+        ...draft.files.map((file) => ({ ...file, path: normalizeProjectPath(file.path) }))
+    ];
+    if (!studioTreeInitialized) {
+        studioFolders.add('');
+        const addExpandedPath = (path, includeLeaf) => {
+            const parts = normalizeProjectPath(path).split('/');
+            if (!includeLeaf) parts.pop();
+            for (let index = 1; index <= parts.length; index += 1) studioFolders.add(parts.slice(0, index).join('/'));
+        };
+        files.forEach((file) => addExpandedPath(file.path, false));
+        (draft.folders || []).forEach((path) => addExpandedPath(path, true));
+        studioTreeInitialized = true;
+    }
+    const folders = new Set(studioFolders);
+    for (const file of files) {
+        const parts = file.path.split('/');
+        parts.pop();
+        for (let index = 1; index <= parts.length; index += 1) folders.add(parts.slice(0, index).join('/'));
+    }
+    for (const folder of draft.folders || []) folders.add(normalizeProjectPath(folder));
+
+    const renderFolder = (folderPath = '') => {
+        const childFolders = [...folders]
+            .filter((path) => path && path.substring(0, path.lastIndexOf('/')) === folderPath)
+            .sort((left, right) => left.localeCompare(right));
+        const childFiles = files
+            .filter((file) => file.path.substring(0, file.path.lastIndexOf('/')) === folderPath)
+            .sort((left, right) => left.path.localeCompare(right.path));
+        return [
+            ...childFolders.map((path) => {
+                const name = path.split('/').pop();
+                const expanded = studioFolders.has(path);
+                return `<div class="file-tree-entry"><button type="button" role="treeitem" class="file-tree-folder" data-a="toggleFolder" data-v="${escapeHtml(path)}" aria-expanded="${expanded}"><span aria-hidden="true">${expanded ? '▾' : '▸'}</span> ${escapeHtml(name)}</button>${expanded ? `<div class="file-tree-children" role="group">${renderFolder(path)}</div>` : ''}</div>`;
+            }),
+            ...childFiles.map((file) => {
+                const isSelected = file.core ? !activeProjectFilePath && activeTab === file.type : activeProjectFilePath === file.path;
+                const action = file.core ? 'fileTab' : 'openProjectFile';
+                const value = file.core ? file.type : file.path;
+                const icon = file.dataUrl || file.core ? '▧' : '▤';
+                return `<button type="button" role="treeitem" class="file-tree-file${isSelected ? ' selected' : ''}" data-a="${action}" data-v="${escapeHtml(value)}" aria-current="${isSelected ? 'page' : 'false'}"><span aria-hidden="true">${icon}</span> ${escapeHtml(file.path.split('/').pop())}</button>`;
+            })
+        ].join('');
+    };
+    tree.innerHTML = `<button type="button" role="treeitem" class="file-tree-folder file-tree-root" data-a="toggleFolder" data-v="" aria-expanded="${studioFolders.has('')}"><span aria-hidden="true">${studioFolders.has('') ? '▾' : '▸'}</span> ${escapeHtml(draft.title || 'Game project')}</button>${studioFolders.has('') ? `<div class="file-tree-children" role="group">${renderFolder()}</div>` : ''}`;
+};
+
+const addProjectPath = (path, isFolder) => {
+    const rawPath = String(path || '').trim().replace(/\\/g, '/');
+    if (!rawPath || /[\u0000-\u001f]/.test(rawPath) || rawPath.split('/').some((part) => part === '..')) {
+        toast('Enter a valid project path.');
+        return false;
+    }
+    const normalized = normalizeProjectPath(rawPath);
+    if (!normalized || normalized.startsWith('/')) {
+        toast('Enter a valid project path.');
+        return false;
+    }
+    if (isFolder) {
+        const filePaths = [...(draft.files || []).map((file) => file.path), ...Object.values(studioFileNames).map((name) => `src/${name}`)];
+        const hasFileConflict = filePaths.some((filePath) =>
+            filePath === normalized || normalized.startsWith(`${filePath}/`)
+        );
+        if (hasFileConflict) {
+            toast('A file already uses that path.');
+            return false;
+        }
+        draft.folders = [...new Set([...(draft.folders || []), normalized])];
+        const parts = normalized.split('/');
+        for (let index = 1; index <= parts.length; index += 1) studioFolders.add(parts.slice(0, index).join('/'));
+    } else {
+        const extension = projectFileType(normalized);
+        if (!projectTextExtensions.has(extension)) {
+            toast('Choose a text file type such as .js, .css, .json, .txt, or .svg.');
+            return false;
+        }
+        const exists = (draft.files || []).some((file) => file.path === normalized) ||
+            Object.values(studioFileNames).some((name) => `src/${name}` === normalized) ||
+            (draft.folders || []).some((folder) => normalizeProjectPath(folder) === normalized);
+        if (exists) {
+            toast('A file already uses that path.');
+            return false;
+        }
+        if ([...(draft.files || []).map((file) => file.path), ...Object.values(studioFileNames).map((name) => `src/${name}`)]
+            .some((filePath) => filePath.startsWith(`${normalized}/`))) {
+            toast('That path is already used by a folder.');
+            return false;
+        }
+        draft.files = [...(draft.files || []), { path: normalized, content: '' }];
+        activeProjectFilePath = normalized;
+        const parts = normalized.split('/');
+        parts.pop();
+        for (let index = 1; index <= parts.length; index += 1) studioFolders.add(parts.slice(0, index).join('/'));
+    }
+    studioFolders.add('');
+    runPreview();
+    if (!isFolder) renderActiveStudioFile();
+    else renderStudioFileTree();
+    return true;
 };
 
 const renderStudioProjects = () => {
@@ -518,7 +729,7 @@ const renderStudioProjects = () => {
     if (status) {
         status.textContent = studioProjects.length
             ? `${studioProjects.length} project${studioProjects.length === 1 ? '' : 's'} saved to your account.`
-            : 'No server projects yet. Create a game below and submit it for review.';
+            : 'No saved projects yet. Create a game to get started.';
     }
 };
 
@@ -547,76 +758,122 @@ async function loadStudioProjects() {
 }
 
 function studio() {
-    activeTab = 'html';
-    selectedStudioProjectId = draft.id || '';
+    if (studioWorkspaceOpen) {
+        renderStudioWorkspace();
+    } else {
+        renderStudioDashboard();
+    }
+    loadStudioProjects();
+}
 
+function renderStudioDashboard() {
     $('#app').innerHTML = `
-        <h1>Studio</h1>
-        <p class="mu">A game is one file: HTML, CSS and JavaScript. Write it here or upload your own files and Studio bundles them. Use data: URLs for images and audio, and no external links.</p>
-        <div class="studio-shell">
-            <aside class="studio-sidebar" aria-label="Your projects">
-                <div class="studio-sidebar-heading">
-                    <h2>My projects</h2>
-                    <button class="b" data-a="newProject">New</button>
-                </div>
-                <p id="project-status" class="mu studio-status">Loading your projects…</p>
-                <div id="project-list" class="studio-project-list"></div>
-                <div class="studio-project-actions" id="project-actions" hidden>
-                    <button class="b p" data-a="editProject">Open selected</button>
-                    <button class="b" data-a="playProject">Play</button>
-                    <button class="b" id="toggle-visibility" data-a="toggleVisibility">Archive (make private)</button>
-                    <button class="b" data-a="deleteProject">Delete permanently</button>
-                </div>
-            </aside>
-            <div class="studio-main">
-                <div class="studio">
-                    <div>
-                        <input id="ti" placeholder="Game title" aria-label="Game title">
-                        <div class="bar">${['html', 'css', 'js'].map((tabName) => `<button class="b${tabName == 'html' ? ' on' : ''}" data-a="tab" data-v="${tabName}">${tabName.toUpperCase()}</button>`).join('')}</div>
-                        <textarea id="ed" class="ed" spellcheck="false" aria-label="Code editor"></textarea>
-                        <div class="bar">
-                            <button class="b" data-a="upl">Upload files</button>
-                            <button class="b" data-a="tpl">Starter template</button>
-                        </div>
-                        <input id="up" type="file" multiple accept=".html,.htm,.css,.js" hidden>
+        <section class="studio-page studio-dashboard">
+            <div class="studio-dashboard-heading">
+                <div><p class="studio-eyebrow">PLAYBOX STUDIO</p><h1>Your games</h1><p class="mu">Open a project to keep building, or start something new.</p></div>
+                <button class="b p" data-a="newProject">＋ New project</button>
+            </div>
+            <div class="studio-dashboard-grid">
+                <section class="studio-panel" aria-label="Your projects">
+                    <div class="studio-sidebar-heading"><h2>My projects</h2></div>
+                    <p id="project-status" class="mu studio-status">Loading your projects…</p>
+                    <div id="project-list" class="studio-project-list"></div>
+                    <div class="studio-project-actions" id="project-actions" hidden>
+                        <button class="b p" data-a="editProject">Open selected</button>
+                        <button class="b" data-a="playProject">Play</button>
+                        <button class="b" id="toggle-visibility" data-a="toggleVisibility">Archive (make private)</button>
+                        <button class="b" data-a="deleteProject">Delete permanently</button>
                     </div>
-                    <div>
+                    ${db.draft ? '<button class="b studio-continue" data-a="continueDraft">Continue local draft</button>' : ''}
+                </section>
+                <section class="studio-welcome">
+                    <div class="studio-welcome-icon" aria-hidden="true">✦</div>
+                    <h2>Make something playable</h2>
+                    <p class="mu">Each game has its own files, live preview, and publishing details. Your work is saved as you edit.</p>
+                    <button class="b p" data-a="newProject">Create a game</button>
+                </section>
+            </div>
+        </section>
+    `;
+}
+
+function renderStudioWorkspace() {
+    $('#app').innerHTML = `
+        <section class="studio-page studio-workspace">
+            <div class="studio-workspace-heading">
+                <div><button class="b studio-back" data-a="backToProjects">← All projects</button><p class="studio-eyebrow">PROJECT WORKSPACE</p><h1 id="workspace-title">${escapeHtml(draft.title || 'Untitled game')}</h1></div>
+                <button class="b p studio-publish" data-a="publish">Publish</button>
+            </div>
+            <div class="studio-workspace-grid">
+                <aside class="studio-file-sidebar" aria-label="Game files">
+                    <div class="file-sidebar-heading"><b>FILES</b><div class="file-sidebar-actions"><button type="button" class="b" data-a="newFile">＋ File</button><button type="button" class="b" data-a="newFolder">＋ Folder</button></div></div>
+                    <div id="file-tree" class="file-tree" role="tree"></div>
+                    <button type="button" class="b file-upload-button" data-a="upl">Upload files</button>
+                    <input id="up" type="file" multiple hidden>
+                    <p class="mu sm file-tree-note">CSS and JavaScript are included; use <code>Playbox.files["path"]</code> for text files. Images and SVGs are embedded.</p>
+                </aside>
+                <div class="studio-editor-preview">
+                    <section class="studio-editor-pane" aria-label="Code editor">
+                        <div class="editor-file-heading"><span aria-hidden="true">▧</span><b id="editor-file-name"></b><button class="b" data-a="deleteProjectFile" hidden>Delete file</button><button class="b" data-a="tpl">Reset starter</button></div>
+                        <div id="asset-preview" class="asset-preview" hidden></div>
+                        <textarea id="ed" class="ed" spellcheck="false" aria-label="Code editor"></textarea>
+                    </section>
+                    <section class="studio-preview-pane" aria-label="Live preview">
+                        <div class="preview-heading"><b>Live preview</b><span class="mu sm">Updates as you edit</span></div>
                         <div class="frame"><iframe id="pv" title="Live preview" sandbox="allow-scripts allow-pointer-lock"></iframe></div>
                         <pre class="log" id="log">SDK calls from your game show up here.</pre>
                         <div id="fl"></div>
-                    </div>
+                    </section>
                 </div>
-                <h2>Game page</h2>
-                <div class="gp">
-                    <div>
-                        <input id="ds" maxlength="120" placeholder="One-line description shown on the card" aria-label="Description">
-                        <textarea id="ab" class="in" maxlength="2000" placeholder="About this game: how to play, controls, credits" aria-label="About this game"></textarea>
-                        <input id="tg" placeholder="Tags, separated by commas (up to 5)" aria-label="Tags">
-                    </div>
+            </div>
+            <dialog id="publish-dialog" class="publish-dialog" aria-labelledby="publish-title">
+                <div class="publish-dialog-heading"><div><p class="studio-eyebrow">READY TO SHARE?</p><h2 id="publish-title">Publish your game</h2></div><button type="button" class="b" data-a="closePublish" aria-label="Close">×</button></div>
+                <p class="mu">Add the details players will see. Your game will be submitted for review.</p>
+                <label class="studio-field">Game name<input id="ti" placeholder="Game title" aria-label="Game name"></label>
+                <label class="studio-field">Description<input id="ds" maxlength="120" placeholder="One-line description shown on the card" aria-label="Description"></label>
+                <label class="studio-field">About this game<textarea id="ab" class="in" maxlength="2000" placeholder="How to play, controls, credits" aria-label="About this game"></textarea></label>
+                <label class="studio-field">Tags<input id="tg" placeholder="Tags, separated by commas (up to 5)" aria-label="Tags"></label>
+                <div class="publish-details">
                     <div>
                         <div class="card" id="pc"></div>
-                        <div class="bar">
-                            <button class="b" data-a="thb">Choose thumbnail</button>
-                            <button class="b" data-a="thx">Remove</button>
-                        </div>
+                        <div class="bar"><button class="b" data-a="thb">Choose thumbnail</button><button class="b" data-a="thx">Remove</button></div>
                         <label class="mu sm">Fallback color <input id="co" type="color"></label>
                         <input id="tf" type="file" accept="image/png,image/jpeg,image/webp" hidden>
-                        <p class="mu sm">Cropped to 8:5 and shrunk to 480×300. Moderators review it together with your game.</p>
+                        <p class="mu sm">PNG, JPEG or WebP; cropped to 8:5. Moderators review it with your game.</p>
                     </div>
+                    <div class="publish-preview-note"><b>What happens next?</b><p class="mu">We’ll review your game before it appears in Browse. You can keep editing it from your Studio dashboard.</p></div>
                 </div>
-                <h2>Submit for review</h2>
-                <button class="b p" data-a="sub">Submit for review</button>
-                <span class="mu sm">${db.user ? 'Signed in as ' + escapeHtml(publicUsername || 'Player') + '.' : 'Sign in on the Account page to submit.'}</span>
-            </div>
-        </div>
+                <div class="bar publish-actions"><button type="button" class="b" data-a="closePublish">Cancel</button><button type="button" class="b p" data-a="sub">Submit for review</button></div>
+                <p class="mu sm">${db.user ? 'Signed in as ' + escapeHtml(publicUsername || 'Player') + '.' : 'Sign in on the Account page to publish.'}</p>
+            </dialog>
+            <dialog id="new-file-dialog" class="publish-dialog new-file-dialog" aria-labelledby="new-file-title">
+                <div class="publish-dialog-heading"><div><p class="studio-eyebrow">PROJECT FILES</p><h2 id="new-file-title">Add a file</h2></div><button type="button" class="b" data-a="closeNewFile" aria-label="Close">×</button></div>
+                <label class="studio-field">Name<input id="new-file-name" placeholder="src/helpers.js" autocomplete="off"></label>
+                <p class="mu sm">Use a name or relative path. Supported text types include JS, CSS, JSON, TXT, and SVG.</p>
+                <div class="bar publish-actions"><button type="button" class="b" data-a="closeNewFile">Cancel</button><button type="button" class="b p" data-a="createProjectFile">Add file</button></div>
+            </dialog>
+            <dialog id="new-folder-dialog" class="publish-dialog new-file-dialog" aria-labelledby="new-folder-title">
+                <div class="publish-dialog-heading"><div><p class="studio-eyebrow">PROJECT FOLDERS</p><h2 id="new-folder-title">Add a folder</h2></div><button type="button" class="b" data-a="closeNewFolder" aria-label="Close">×</button></div>
+                <label class="studio-field">Folder name<input id="new-folder-name" placeholder="src/components" autocomplete="off"></label>
+                <div class="bar publish-actions"><button type="button" class="b" data-a="closeNewFolder">Cancel</button><button type="button" class="b p" data-a="createProjectFolder">Add folder</button></div>
+            </dialog>
+        </section>
     `;
 
+    renderStudioFileTree();
+    renderActiveStudioFile();
     $('#ed').oninput = (event) => {
-        draft[activeTab] = event.target.value;
+        if (activeProjectFilePath) {
+            const file = draft.files.find((entry) => entry.path === activeProjectFilePath);
+            if (file) file.content = event.target.value;
+        } else {
+            draft[activeTab] = event.target.value;
+        }
         triggerPreview();
     };
     $('#ti').oninput = (event) => {
         draft.title = event.target.value;
+        $('#workspace-title').textContent = draft.title || 'Untitled game';
         triggerPreview();
     };
     $('#ds').oninput = (event) => {
@@ -648,12 +905,14 @@ function studio() {
         }
     };
     $('#up').onchange = async (event) => {
-        await ingest(event.target.files);
+        try {
+            await ingest(event.target.files);
+        } catch (error) {
+            toast(`Could not add files: ${error.message}`);
+        }
         event.target.value = '';
     };
     fillStudioInputs();
-    renderStudioProjects();
-    loadStudioProjects();
 }
 
 function docs() {
@@ -725,66 +984,75 @@ function docs() {
 }
 
 async function ingest(files) {
-    const byName = {};
-    for (const file of files) byName[file.name.toLowerCase()] = await file.text();
+    const uploads = [...files];
+    if (!uploads.length) return;
+    if (uploads.some((file) => file.size > 1_000_000)) throw new Error('Each uploaded file must be under 1 MB.');
+    const totalSize = uploads.reduce((total, file) => total + file.size, 0) +
+        (draft.files || []).reduce((total, file) => total + (file.content || file.dataUrl || '').length, 0);
+    if (totalSize > 3_000_000) throw new Error('The project file limit is 3 MB.');
 
-    const cssFiles = [];
-    const jsFiles = [];
-    const warnings = [];
-    let htmlContent = '';
-    const basename = (value = '') => value.split('/').pop().toLowerCase();
-
-    for (const [fileName, fileText] of Object.entries(byName)) {
-        if (!/\.html?$/i.test(fileName)) continue;
-
-        const parsed = new DOMParser().parseFromString(fileText, 'text/html');
-
-        parsed.querySelectorAll('link[rel~=stylesheet]').forEach((link) => {
-            const href = link.getAttribute('href');
-            const key = basename(href);
-            if (/^https?:/i.test(href || '') || byName[key] === undefined) {
-                warnings.push('Not bundled: ' + href);
-            } else if (!cssFiles.includes(byName[key])) {
-                cssFiles.push(byName[key]);
-            }
-            link.remove();
+    const uploaded = [];
+    for (const file of uploads) {
+        const path = normalizeProjectPath(file.webkitRelativePath || file.name);
+        const extension = projectFileType(path);
+        const isText = projectTextExtensions.has(extension) || file.type.startsWith('text/') ||
+            /(?:javascript|json|xml)/i.test(file.type);
+        uploaded.push({
+            path,
+            content: isText ? await file.text() : '',
+            dataUrl: isText ? '' : await readFileAsDataUrl(file)
         });
+    }
 
-        parsed.querySelectorAll('script').forEach((script) => {
-            const src = script.getAttribute('src');
-            const key = basename(src);
-            if (src) {
-                if (/^https?:/i.test(src) || byName[key] === undefined) {
-                    warnings.push('Not bundled: ' + src);
-                } else if (!jsFiles.includes(byName[key])) {
-                    jsFiles.push(byName[key]);
-                }
-            } else {
-                jsFiles.push(script.textContent);
-            }
+    const htmlFile = uploaded.find((file) => ['index.html', 'index.htm'].includes(file.path.split('/').pop().toLowerCase()));
+    if (htmlFile) {
+        const parsed = new DOMParser().parseFromString(htmlFile.content, 'text/html');
+        const inlineCss = [];
+        const inlineJs = [];
+        parsed.querySelectorAll('style').forEach((style) => {
+            inlineCss.push(style.textContent);
+            style.remove();
+        });
+        parsed.querySelectorAll('script:not([src])').forEach((script) => {
+            inlineJs.push(script.textContent);
             script.remove();
         });
-
-        parsed.querySelectorAll('style').forEach((styleBlock) => {
-            cssFiles.push(styleBlock.textContent);
-            styleBlock.remove();
-        });
-
-        htmlContent = parsed.body.innerHTML.trim();
+        draft.html = parsed.body.innerHTML.trim();
         if (parsed.title) draft.title = parsed.title;
+        if (inlineCss.length) draft.css = `${draft.css}\n${inlineCss.join('\n')}`;
+        if (inlineJs.length) draft.js = `${draft.js}\n;\n${inlineJs.join('\n;\n')}`;
+        activeTab = 'html';
+        activeProjectFilePath = '';
     }
 
-    for (const [fileName, fileText] of Object.entries(byName)) {
-        if (fileName.endsWith('.css') && !cssFiles.includes(fileText)) cssFiles.push(fileText);
-        if (fileName.endsWith('.js') && !jsFiles.includes(fileText)) jsFiles.push(fileText);
+    for (const file of uploaded) {
+        const basename = file.path.split('/').pop().toLowerCase();
+        if (file === htmlFile) continue;
+        if (['style.css', 'src/style.css'].includes(file.path)) {
+            draft.css = file.content;
+            continue;
+        }
+        if (['script.js', 'src/script.js'].includes(file.path)) {
+            draft.js = file.content;
+            continue;
+        }
+        if (file.path === 'src/index.html') {
+            draft.html = new DOMParser().parseFromString(file.content, 'text/html').body.innerHTML.trim();
+            continue;
+        }
+        const existing = draft.files.findIndex((entry) => entry.path === file.path);
+        if (existing < 0) draft.files.push(file);
+        else draft.files[existing] = file;
+        const parts = file.path.split('/');
+        parts.pop();
+        for (let index = 1; index <= parts.length; index += 1) studioFolders.add(parts.slice(0, index).join('/'));
     }
-
-    if (htmlContent) draft.html = htmlContent;
-    if (cssFiles.length) draft.css = cssFiles.join('\n');
-    if (jsFiles.length) draft.js = jsFiles.join('\n;\n');
-
+    studioFolders.add('');
+    activeTab = 'html';
+    activeProjectFilePath = '';
     fillStudioInputs();
-    toast(warnings.length ? warnings[0] + (warnings.length > 1 ? ' (+' + (warnings.length - 1) + ' more)' : '') : 'Bundled ' + Object.keys(byName).length + ' file(s) into one game.');
+    renderActiveStudioFile();
+    toast(`Added ${uploads.length} file${uploads.length === 1 ? '' : 's'} to the project.`);
 }
 
 async function review() {
@@ -943,8 +1211,53 @@ const actionHandlers = {
     },
     tab(value) {
         activeTab = value;
-        $('#ed').value = draft[value];
-        document.querySelectorAll('[data-a=tab]').forEach((button) => button.classList.toggle('on', button.dataset.v == value));
+        activeProjectFilePath = '';
+        renderActiveStudioFile();
+    },
+    fileTab(value) {
+        this.tab(value);
+    },
+    openProjectFile(path) {
+        activeProjectFilePath = path;
+        const parts = path.split('/');
+        parts.pop();
+        for (let index = 1; index <= parts.length; index += 1) studioFolders.add(parts.slice(0, index).join('/'));
+        const file = draft.files.find((entry) => entry.path === path);
+        if (file) renderActiveStudioFile();
+    },
+    toggleFolder(value) {
+        if (studioFolders.has(value)) studioFolders.delete(value);
+        else studioFolders.add(value);
+        renderStudioFileTree();
+    },
+    newFile() {
+        $('#new-file-name').value = '';
+        $('#new-file-dialog').showModal();
+        $('#new-file-name').focus();
+    },
+    newFolder() {
+        $('#new-folder-name').value = '';
+        $('#new-folder-dialog').showModal();
+        $('#new-folder-name').focus();
+    },
+    closeNewFile() {
+        $('#new-file-dialog').close();
+    },
+    closeNewFolder() {
+        $('#new-folder-dialog').close();
+    },
+    createProjectFile() {
+        if (addProjectPath($('#new-file-name').value, false)) $('#new-file-dialog').close();
+    },
+    createProjectFolder() {
+        if (addProjectPath($('#new-folder-name').value, true)) $('#new-folder-dialog').close();
+    },
+    deleteProjectFile() {
+        if (!activeProjectFilePath) return;
+        draft.files = draft.files.filter((file) => file.path !== activeProjectFilePath);
+        activeProjectFilePath = '';
+        renderActiveStudioFile();
+        runPreview();
     },
     thb() {
         $('#tf').click();
@@ -959,8 +1272,37 @@ const actionHandlers = {
         $('#up').click();
     },
     tpl() {
-        draft = { ...starterTemplate };
-        fillStudioInputs();
+        if (activeProjectFilePath) {
+            const file = draft.files.find((entry) => entry.path === activeProjectFilePath);
+            if (file) file.content = '';
+            renderActiveStudioFile();
+        } else {
+            draft[activeTab] = starterTemplate[activeTab];
+            renderActiveStudioFile();
+        }
+        runPreview();
+    },
+    publish() {
+        const dialog = $('#publish-dialog');
+        if (!dialog.open) dialog.showModal();
+    },
+    closePublish() {
+        $('#publish-dialog').close();
+    },
+    backToProjects() {
+        studioWorkspaceOpen = false;
+        studio();
+    },
+    continueDraft() {
+        if (!db.draft) return toast('There is no saved local draft to continue.');
+        draft = { ...starterTemplate, ...db.draft };
+        if (!Array.isArray(draft.files)) draft.files = [];
+        if (!Array.isArray(draft.folders)) draft.folders = [];
+        selectedStudioProjectId = draft.id || '';
+        activeTab = 'html';
+        activeProjectFilePath = '';
+        studioWorkspaceOpen = true;
+        studio();
     },
     async sub() {
         if (!db.user) return toast('Sign in on the Account page to submit.');
@@ -968,7 +1310,8 @@ const actionHandlers = {
         if (!draft.title.trim()) return toast('Add a title.');
         if (!draft.desc.trim()) return toast('Add a one-line description.');
         if (!draft.js.trim() && !draft.html.trim()) return toast('Nothing to submit yet.');
-        if (new TextEncoder().encode(draft.html + draft.css + draft.js).length > 1_800_000) {
+        const compiled = compileStudioProject(draft);
+        if (new TextEncoder().encode(compiled.html + compiled.css + compiled.js).length > 1_800_000) {
             return toast('This game is too large for D1 storage. The limit is about 1.8 MB.');
         }
 
@@ -986,9 +1329,9 @@ const actionHandlers = {
                     title: draft.title.trim(),
                     description: draft.desc,
                     color: getColor(draft.color),
-                    html: draft.html,
-                    css: draft.css,
-                    js: draft.js,
+                    html: compiled.html,
+                    css: compiled.css,
+                    js: compiled.js,
                     about: (draft.about || '').trim(),
                     tags: tagList(draft.tags),
                     thumbnail: draft.thumbData || undefined,
@@ -1004,12 +1347,23 @@ const actionHandlers = {
                 throw new Error('The server returned an invalid version response.');
             }
 
+            if (!db.projectWorkspaces) db.projectWorkspaces = {};
+            const previousVersion = studioProjects.find((project) => project.id === draft.id)?.version_number;
+            db.projectWorkspaces[draft.id] = {
+                version_number: result.version_number || (isNewProject ? 1 : Number(previousVersion) + 1),
+                html: draft.html,
+                css: draft.css,
+                js: draft.js,
+                files: draft.files || [],
+                folders: draft.folders || []
+            };
             selectedStudioProjectId = draft.id;
             saveData();
             draft.thumb_url = typeof result.thumb_url === 'string' ? result.thumb_url : draft.thumb_url;
             draft.thumbData = '';
             draft.removeThumb = false;
-            refreshCardPreview();
+            studioWorkspaceOpen = false;
+            renderStudioDashboard();
             toast(`Version ${result.version_number || 1} submitted for review.`);
             await loadStudioProjects();
         } catch (error) {
@@ -1020,22 +1374,32 @@ const actionHandlers = {
         const projectId = selectedStudioProjectId;
         const project = studioProjects.find((entry) => entry.id === projectId);
         if (!project) return toast('Select a project first.');
+        const savedWorkspace = db.projectWorkspaces && db.projectWorkspaces[project.id];
+        const hasSavedWorkspace = savedWorkspace &&
+            String(savedWorkspace.version_number) === String(project.version_number);
         draft = {
             id: project.id,
             title: project.title,
             desc: project.description,
             color: project.color,
-            html: project.html,
-            css: project.css,
-            js: project.js,
+            html: hasSavedWorkspace ? savedWorkspace.html : project.html,
+            css: hasSavedWorkspace ? savedWorkspace.css : project.css,
+            js: hasSavedWorkspace ? savedWorkspace.js : project.js,
             about: project.about || '',
             tags: tagList(project.tags).join(', '),
             thumb_url: project.thumb_url || '',
             thumbData: '',
-            removeThumb: false
+            removeThumb: false,
+            files: hasSavedWorkspace ? savedWorkspace.files : [],
+            folders: hasSavedWorkspace ? savedWorkspace.folders : []
         };
         selectedStudioProjectId = project.id;
-        fillStudioInputs();
+        activeTab = 'html';
+        activeProjectFilePath = '';
+        studioFolders = new Set();
+        studioTreeInitialized = false;
+        studioWorkspaceOpen = true;
+        studio();
         toast(`Editing ${project.title}. Submitting changes creates a new review version.`);
     },
     selectProject(projectId) {
@@ -1046,8 +1410,11 @@ const actionHandlers = {
         draft = { ...starterTemplate };
         selectedStudioProjectId = '';
         activeTab = 'html';
-        fillStudioInputs();
-        renderStudioProjects();
+        activeProjectFilePath = '';
+        studioFolders = new Set();
+        studioTreeInitialized = false;
+        studioWorkspaceOpen = true;
+        studio();
     },
     playProject() {
         const projectId = selectedStudioProjectId;
@@ -1080,10 +1447,13 @@ const actionHandlers = {
             await authenticatedApiRequest(`/api/my/games/${encodeURIComponent(projectId)}`, {
                 method: 'DELETE'
             });
+            if (db.projectWorkspaces) delete db.projectWorkspaces[projectId];
             studioProjects = studioProjects.filter((entry) => entry.id !== projectId);
             selectedStudioProjectId = '';
-            if (draft.id === projectId) draft = { ...starterTemplate };
-            fillStudioInputs();
+            if (draft.id === projectId) {
+                draft = { ...starterTemplate };
+                studioWorkspaceOpen = false;
+            }
             renderStudioProjects();
             toast('Project permanently deleted.');
         } catch (error) {
@@ -1232,6 +1602,7 @@ const actionHandlers = {
         const userId = db.user;
         Object.keys(db.saves).forEach((key) => key.startsWith(userId + '|') && delete db.saves[key]);
         delete db.favs[userId];
+        db.projectWorkspaces = {};
         draft = { ...starterTemplate };
         db.draft = null;
         saveData();
@@ -1345,6 +1716,7 @@ if (window.supabase && SUPABASE_URL && SUPABASE_PUBLISHABLE_KEY) {
             draft = { ...starterTemplate };
             db.draft = null;
             db.draftUser = '';
+            db.projectWorkspaces = {};
             studioProjects = [];
             selectedStudioProjectId = '';
         }
