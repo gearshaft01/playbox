@@ -548,13 +548,15 @@ const compileStudioProject = (project) => {
 
     for (const asset of assets) {
         const encoded = asset.dataUrl || `data:image/svg+xml;charset=utf-8,${encodeURIComponent(asset.content || '')}`;
-        const paths = [normalizeProjectPath(asset.path), asset.path.split('/').pop()];
-        for (const path of new Set(paths)) {
+        const parts = normalizeProjectPath(asset.path).split('/');
+        const aliases = parts.map((_, index) => parts.slice(index).join('/')).sort((left, right) => right.length - left.length);
+        for (const path of aliases) {
             const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const reference = new RegExp(`(?<![A-Za-z0-9_])(?:\\.\\/)?${escapedPath.replace(/\//g, '\\/')}(?![A-Za-z0-9_.-])`, 'g');
-            html = html.replace(reference, encoded);
-            css = css.replace(reference, encoded);
-            js = js.replace(reference, encoded);
+            const reference = new RegExp(`(^|[^A-Za-z0-9_])(?:[A-Za-z0-9_.-]+\\/)*${escapedPath}(?:[?#][^"'\\s)>]*)?(?=$|["'\\s)>])`, 'gi');
+            const replaceReference = (source) => source.replace(reference, (_match, prefix) => prefix + encoded);
+            html = replaceReference(html);
+            css = replaceReference(css);
+            js = replaceReference(js);
         }
     }
 
@@ -809,8 +811,10 @@ function renderStudioWorkspace() {
                     <div class="file-sidebar-heading"><b>FILES</b><div class="file-sidebar-actions"><button type="button" class="b" data-a="newFile">＋ File</button><button type="button" class="b" data-a="newFolder">＋ Folder</button></div></div>
                     <div id="file-tree" class="file-tree" role="tree"></div>
                     <button type="button" class="b file-upload-button" data-a="upl">Upload files</button>
+                    <button type="button" class="b file-upload-button" data-a="uplFolder">Upload folder</button>
                     <input id="up" type="file" multiple hidden>
-                    <p class="mu sm file-tree-note">CSS and JavaScript are included; use <code>Playbox.files["path"]</code> for text files. Images and SVGs are embedded.</p>
+                    <input id="up-folder" type="file" multiple webkitdirectory directory hidden>
+                    <p class="mu sm file-tree-note">Project assets are rooted here. The <code>src</code> folder holds the built-in editor files.</p>
                 </aside>
                 <div class="studio-editor-preview">
                     <section class="studio-editor-pane" aria-label="Code editor">
@@ -912,6 +916,14 @@ function renderStudioWorkspace() {
         }
         event.target.value = '';
     };
+    $('#up-folder').onchange = async (event) => {
+        try {
+            await ingest(event.target.files, true);
+        } catch (error) {
+            toast(`Could not add folder: ${error.message}`);
+        }
+        event.target.value = '';
+    };
     fillStudioInputs();
 }
 
@@ -983,7 +995,7 @@ function docs() {
     `;
 }
 
-async function ingest(files) {
+async function ingest(files, directoryUpload = false) {
     const uploads = [...files];
     if (!uploads.length) return;
     if (uploads.some((file) => file.size > 1_000_000)) throw new Error('Each uploaded file must be under 1 MB.');
@@ -991,9 +1003,17 @@ async function ingest(files) {
         (draft.files || []).reduce((total, file) => total + (file.content || file.dataUrl || '').length, 0);
     if (totalSize > 3_000_000) throw new Error('The project file limit is 3 MB.');
 
+    const relativePaths = uploads.map((file) => file.webkitRelativePath || file.name);
+    const rootFolders = new Set(relativePaths.map((path) => path.split('/')[0]));
+    const rootFolder = directoryUpload && rootFolders.size === 1 && relativePaths.every((path) => path.includes('/'))
+        ? relativePaths[0].split('/')[0]
+        : '';
     const uploaded = [];
-    for (const file of uploads) {
-        const path = normalizeProjectPath(file.webkitRelativePath || file.name);
+    for (const [index, file] of uploads.entries()) {
+        const relativePath = relativePaths[index];
+        const path = normalizeProjectPath(rootFolder && relativePath.startsWith(`${rootFolder}/`)
+            ? relativePath.slice(rootFolder.length + 1)
+            : relativePath);
         const extension = projectFileType(path);
         const isText = projectTextExtensions.has(extension) || file.type.startsWith('text/') ||
             /(?:javascript|json|xml)/i.test(file.type);
